@@ -1,0 +1,9 @@
+# kibana/config/kibana.yml
+server.name: kibana
+server.host: "0.0.0.0"
+server.port: 5601
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+
+# Performance
+elasticsearch.requestTimeout: 60000
+server.maxPayload: 10485760

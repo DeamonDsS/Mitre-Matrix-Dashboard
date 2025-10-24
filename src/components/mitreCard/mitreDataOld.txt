@@ -1,0 +1,127 @@
+import type { MitreTacticFramework as MitreTactic, MitreTechniqueFramework as MitreTechnique } from '../../types/mitre';
+
+const TACTIC_ORDER = [
+  'reconnaissance',       
+  'resource-development',
+  'initial-access',
+  'execution',
+  'persistence',
+  'privilege-escalation',
+  'defense-evasion',
+  'credential-access',
+  'discovery',
+  'lateral-movement',
+  'collection',
+  'command-and-control',
+  'exfiltration',
+  'impact'
+];
+
+const DATA_SOURCE_EVENT_MAP: Record<string, number[]> = {
+  'Process: Process Creation': [4688],
+  'Command: Command Execution': [4688, 4104, 800],
+  'Service: Service Creation': [7045, 4697],
+  'Windows Registry': [4657, 12, 13],
+  'User Account': [4720, 4722, 4738, 4624, 4625, 4648],
+  'Logon Session': [4624, 4648, 4672],
+  'Scheduled Job': [4698, 4699, 4700, 4701, 106],
+  'File': [4663, 4656, 2, 11, 23],
+  'Network Traffic': [5156, 3],
+  'Network Share': [5140, 5145],
+  'Active Directory': [4662, 4661, 5136],
+  'Windows Event Logs': [1102, 1100, 104],
+  'Driver': [6, 4697],
+  'Module': [7],
+  'Process: Process Termination': [4689],
+  'Process: OS API Execution': [10]
+};
+
+export function mapDataSourcesToEventIds(dataSources: string[]): number[] {
+  const eventIds = new Set<number>();
+  dataSources.forEach(ds => {
+    Object.entries(DATA_SOURCE_EVENT_MAP).forEach(([key, ids]) => {
+      if (ds.includes(key) || key.includes(ds)) {
+        ids.forEach(id => eventIds.add(id));
+      }
+    });
+  });
+  return Array.from(eventIds);
+}
+
+export async function loadMitreData(): Promise<{
+  tactics: MitreTactic[];
+  techniques: MitreTechnique[];
+}> {
+  const response = await fetch('/data/enterprise-attack.json');
+  const data = await response.json();
+
+
+  const tactics = data.objects
+    .filter((obj: any) => obj.type === 'x-mitre-tactic')
+    .map((tactic: any) => ({
+      id: tactic.external_references?.find((ref: any) => ref.source_name === 'mitre-attack')?.external_id || '',
+      name: tactic.name,
+      description: tactic.description,
+      shortName: tactic.x_mitre_shortname || tactic.name
+    }))
+    .sort((a: MitreTactic, b: MitreTactic) =>
+      TACTIC_ORDER.indexOf(a.shortName) - TACTIC_ORDER.indexOf(b.shortName)
+    );
+
+  const techniques = data.objects
+    .filter((obj: any) => {
+    const isWindowsTechnique = obj.x_mitre_platforms?.some((p: string) => 
+      p.toLowerCase().includes('windows')
+    );
+    
+    const isReconOrResourceDev = obj.kill_chain_phases?.some((phase: any) => 
+      phase.phase_name === 'reconnaissance' || 
+      phase.phase_name === 'resource-development'
+    );
+    
+    return obj.type === 'attack-pattern' &&
+      !obj.revoked &&
+      !obj.x_mitre_deprecated &&
+      (isWindowsTechnique || isReconOrResourceDev);
+  })
+    .map((tech: any) => {
+      const externalId = tech.external_references?.find(
+        (ref: any) => ref.source_name === 'mitre-attack'
+      )?.external_id || '';
+
+      const tactics = tech.kill_chain_phases?.map(
+        (phase: any) => phase.phase_name
+      ) || [];
+
+      const dataSources = tech.x_mitre_data_sources || [];
+      const eventIds = mapDataSourcesToEventIds(dataSources);
+
+      return {
+        id: externalId,
+        name: tech.name,
+        description: tech.description,
+        tactics,
+        platforms: tech.x_mitre_platforms || [],
+        dataSources,
+        detection: tech.x_mitre_detection || '',
+        eventIds
+      };
+    })
+    .filter((tech: MitreTechnique) => tech.id.startsWith('T') && !tech.id.includes('.'));
+
+  return { tactics, techniques };
+}
+
+export function getSeverityColor(severity: string): string {
+  switch (severity) {
+    case 'critical': return 'bg-red-500';
+    case 'high': return 'bg-orange-500';
+    case 'medium': return 'bg-yellow-500';
+    case 'low': return 'bg-blue-500';
+    default: return 'bg-gray-300';
+  }
+}
+
+export function getSeverityText(severity: string): string {
+  return severity === 'none' ? 'Not Detected' : severity.toUpperCase();
+}

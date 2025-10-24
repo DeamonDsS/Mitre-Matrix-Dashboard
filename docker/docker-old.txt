@@ -1,0 +1,189 @@
+version: '3.8'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: elasticsearch
+    environment:
+      # Cluster Settings
+      - node.name=es-node-01
+      - cluster.name=security-monitoring-cluster
+      - discovery.type=single-node
+      
+      # Memory Settings (ปรับตามเครื่องของคุณ)
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"  # ใช้ RAM 2GB (ควรเป็น 50% ของ RAM ที่มี)
+      - bootstrap.memory_lock=true
+      
+      # Security Settings (แนะนำเปิดใน production)
+      - xpack.security.enabled=false  # เปลี่ยนเป็น true ใน production
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      
+      # Monitoring & Management
+      - xpack.monitoring.collection.enabled=true
+      - xpack.ml.enabled=false  # ปิด Machine Learning ถ้าไม่ใช้ (ประหยัด RAM)
+      
+      # Index Settings
+      - action.auto_create_index=true
+      - indices.query.bool.max_clause_count=10000
+      
+      # Performance Tuning
+      - thread_pool.write.queue_size=1000
+      - thread_pool.search.queue_size=1000
+      - indices.memory.index_buffer_size=20%
+      
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    
+    volumes:
+      # Persistent Data Storage
+      - es_data:/usr/share/elasticsearch/data
+      - es_logs:/usr/share/elasticsearch/logs
+      # Custom Configuration (optional)
+      # - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      
+    ports:
+      - "9200:9200"
+      - "9300:9300"  # Transport port (สำหรับ cluster communication)
+    
+    networks:
+      - elastic-network
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    
+    restart: unless-stopped
+    
+    # Resource Limits (ปรับตามเครื่องของคุณ)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    container_name: kibana
+    environment:
+      # Elasticsearch Connection
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=elastic  # ถ้าเปิด security
+      - ELASTICSEARCH_PASSWORD=changeme # ถ้าเปิด security
+      
+      # Kibana Settings
+      - SERVER_NAME=kibana
+      - SERVER_HOST=0.0.0.0
+      - SERVER_BASEPATH=""
+      - SERVER_PUBLICBASEURL=http://localhost:5601
+      
+      # Performance
+      - LOGGING_VERBOSE=false
+      - ELASTICSEARCH_REQUESTTIMEOUT=60000
+      - KIBANA_DEFAULTAPPID=discover
+      
+      # Security
+      - XPACK_SECURITY_ENABLED=false  # ตั้งเป็น true ใน production
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=min-32-byte-long-strong-encryption-key-here
+      
+      # Monitoring
+      - XPACK_MONITORING_ENABLED=true
+      - XPACK_MONITORING_UI_CONTAINER_ELASTICSEARCH_ENABLED=true
+      
+    volumes:
+      - kibana_data:/usr/share/kibana/data
+      # Custom Configuration (optional)
+      # - ./kibana/config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+      
+    ports:
+      - "5601:5601"
+    
+    networks:
+      - elastic-network
+    
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    
+    restart: unless-stopped
+    
+    # Resource Limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  # FastAPI Backend (Optional - เพิ่มถ้าต้องการ)
+  # backend:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: security-backend
+  #   environment:
+  #     - ES_URL=http://elasticsearch:9200
+  #     - ES_USER=elastic
+  #     - ES_PASS=changeme
+  #     - PORT=8000
+  #     - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+  #   ports:
+  #     - "8000:8000"
+  #   networks:
+  #     - elastic-network
+  #   depends_on:
+  #     elasticsearch:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #   restart: unless-stopped
+
+  # Winlogbeat (สำหรับเก็บ Windows Event Logs)
+  # winlogbeat:
+  #   image: docker.elastic.co/beats/winlogbeat:8.15.0
+  #   container_name: winlogbeat
+  #   user: root
+  #   environment:
+  #     - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+  #   volumes:
+  #     - ./winlogbeat/winlogbeat.yml:/usr/share/winlogbeat/winlogbeat.yml:ro
+  #   networks:
+  #     - elastic-network
+  #   depends_on:
+  #     elasticsearch:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+networks:
+  elastic-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  es_data:
+    driver: local
+  es_logs:
+    driver: local
+  kibana_data:
+    driver: local

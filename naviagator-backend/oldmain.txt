@@ -1,0 +1,392 @@
+# main.py
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from elasticsearch import Elasticsearch
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
+from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = FastAPI(title="MITRE ATT&CK Security Events API")
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Elasticsearch Configuration
+ES_URL = os.getenv("ES_URL", "http://localhost:9200")
+ES_USER = os.getenv("ES_USER", "")
+ES_PASS = os.getenv("ES_PASS", "")
+
+# Initialize Elasticsearch client
+if ES_USER and ES_PASS:
+    es = Elasticsearch([ES_URL], basic_auth=(ES_USER, ES_PASS))
+else:
+    es = Elasticsearch([ES_URL])
+
+# Pydantic Models
+class SearchRequest(BaseModel):
+    search: Optional[str] = None
+    tactic: Optional[str] = "all"
+    severity: Optional[str] = "all"
+    size: Optional[int] = 100
+
+class MitreTechnique(BaseModel):
+    id: str
+    technique_id: str
+    technique_name: str
+    tactic: str
+    description: str
+    severity: str
+    timestamp: str
+    platform: List[str]
+    event_code: str
+    host_name: str
+    user_name: str
+    process_name: str
+    log_level: str
+    channel: str
+
+class SearchRequest(BaseModel):
+    search: Optional[str] = None
+    tactic: Optional[str] = "all"
+    severity: Optional[str] = "all"
+    size: Optional[int] = 10
+    page: Optional[int] = 1 # เพิ่ม page เข้ามา
+
+# MITRE ATT&CK Mapping
+EVENT_SEVERITY_MAP = {
+    # Security Events - Logon/Logoff
+    "4624": {"severity": "low", "category": "Account Logon Success"},
+    "4625": {"severity": "medium", "category": "Account Logon Failed"},
+    "4634": {"severity": "low", "category": "Account Logged Off"},
+    "4647": {"severity": "low", "category": "User Initiated Logoff"},
+    "4648": {"severity": "medium", "category": "Logon Using Explicit Credentials"},
+    "4672": {"severity": "high", "category": "Special Privileges Assigned"},
+    "4768": {"severity": "low", "category": "Kerberos TGT Requested"},
+    "4769": {"severity": "low", "category": "Kerberos Service Ticket"},
+    "4771": {"severity": "high", "category": "Kerberos Pre-Auth Failed"},
+    "4776": {"severity": "medium", "category": "Credential Validation Attempted"},
+    
+    # Process Events
+    "4688": {"severity": "low", "category": "New Process Created"},
+    "4689": {"severity": "low", "category": "Process Terminated"},
+    
+    # Account Management
+    "4720": {"severity": "medium", "category": "User Account Created"},
+    "4722": {"severity": "medium", "category": "User Account Enabled"},
+    "4723": {"severity": "medium", "category": "Password Change Attempted"},
+    "4724": {"severity": "medium", "category": "Password Reset Attempted"},
+    "4725": {"severity": "medium", "category": "User Account Disabled"},
+    "4726": {"severity": "medium", "category": "User Account Deleted"},
+    "4732": {"severity": "high", "category": "Member Added to Security Group"},
+    "4733": {"severity": "high", "category": "Member Removed from Security Group"},
+    "4738": {"severity": "medium", "category": "User Account Changed"},
+    "4740": {"severity": "high", "category": "User Account Locked Out"},
+    "4756": {"severity": "high", "category": "Member Added to Universal Group"},
+    
+    # Service Events
+    "4697": {"severity": "high", "category": "Service Installed"},
+    "7045": {"severity": "high", "category": "Service Installed (System)"},
+    "7036": {"severity": "low", "category": "Service State Changed"},
+    "7040": {"severity": "medium", "category": "Service Start Type Changed"},
+    
+    # Security Log Events
+    "1102": {"severity": "critical", "category": "Audit Log Cleared"},
+    "1104": {"severity": "critical", "category": "Security Log Full"},
+    "1105": {"severity": "high", "category": "Audit Log Cleared"},
+    
+    # Object Access
+    "4656": {"severity": "low", "category": "Handle to Object Requested"},
+    "4663": {"severity": "low", "category": "Object Access Attempted"},
+    "4670": {"severity": "medium", "category": "Object Permissions Changed"},
+    
+    # Policy Change
+    "4719": {"severity": "high", "category": "System Audit Policy Changed"},
+    "4739": {"severity": "high", "category": "Domain Policy Changed"},
+    
+    # System Events
+    "10016": {"severity": "low", "category": "DCOM Permission Error"},
+    "7000": {"severity": "medium", "category": "Service Failed to Start"},
+    "7001": {"severity": "medium", "category": "Service Dependency Failed"},
+    "7034": {"severity": "medium", "category": "Service Crashed"},
+    "6005": {"severity": "low", "category": "Event Log Service Started"},
+    "6006": {"severity": "low", "category": "Event Log Service Stopped"},
+    "6008": {"severity": "high", "category": "Unexpected Shutdown"},
+    
+    # Application Events
+    "1000": {"severity": "medium", "category": "Application Error"},
+    "1001": {"severity": "medium", "category": "Application Hang"},
+    "1002": {"severity": "high", "category": "Application Crash"},
+    
+    # Windows Defender
+    "1116": {"severity": "high", "category": "Malware Detected"},
+    "1117": {"severity": "high", "category": "Malware Blocked"},
+    "5001": {"severity": "medium", "category": "Real-time Protection Disabled"},
+}
+
+EVENT_TACTIC_MAP = {
+    # Initial Access
+    "4624": "Initial Access",
+    "4625": "Initial Access",
+    "4648": "Lateral Movement",
+    
+    # Execution
+    "4688": "Execution",
+    "4689": "Execution",
+    
+    # Persistence
+    "4697": "Persistence",
+    "7045": "Persistence",
+    "4720": "Persistence",
+    "7040": "Persistence",
+    
+    # Privilege Escalation
+    "4672": "Privilege Escalation",
+    "4732": "Privilege Escalation",
+    "4756": "Privilege Escalation",
+    
+    # Defense Evasion
+    "1102": "Defense Evasion",
+    "1104": "Defense Evasion",
+    "1105": "Defense Evasion",
+    "4719": "Defense Evasion",
+    "5001": "Defense Evasion",
+    
+    # Credential Access
+    "4771": "Credential Access",
+    "4776": "Credential Access",
+    "4768": "Credential Access",
+    "4769": "Credential Access",
+    
+    # Discovery
+    "10016": "Discovery",
+    "4656": "Discovery",
+    "4663": "Discovery",
+    
+    # Impact
+    "1116": "Impact",
+    "1117": "Impact",
+    "6008": "Impact",
+    "7034": "Impact",
+}
+
+def map_event_to_mitre(hit: Dict[str, Any]) -> Dict[str, Any]:
+    """Map Elasticsearch event to MITRE ATT&CK format"""
+    source = hit.get("_source", {})
+    
+    # Extract event code
+    event_code = (
+        source.get("event", {}).get("code") or
+        str(source.get("winlog", {}).get("event_id", "")) or
+        "unknown"
+    )
+    
+    event_info = EVENT_SEVERITY_MAP.get(event_code, {
+        "severity": "medium",
+        "category": "Unknown Event"
+    })
+    
+    # Extract user information
+    user_name = (
+        source.get("user", {}).get("name") or
+        source.get("winlog", {}).get("event_data", {}).get("TargetUserName") or
+        source.get("winlog", {}).get("event_data", {}).get("SubjectUserName") or
+        (source.get("related", {}).get("user", []) or ["N/A"])[0]
+    )
+    
+    # Extract host information
+    host_name = (
+        source.get("host", {}).get("name") or
+        source.get("host", {}).get("hostname") or
+        source.get("agent", {}).get("name") or
+        source.get("winlog", {}).get("computer_name") or
+        "Unknown Host"
+    )
+    
+    # Extract process information
+    process_name = (
+        source.get("process", {}).get("name") or
+        source.get("process", {}).get("executable") or
+        source.get("winlog", {}).get("event_data", {}).get("ProcessName") or
+        source.get("winlog", {}).get("event_data", {}).get("NewProcessName") or
+        ""
+    )
+    
+    # Extract channel
+    channel = (
+        source.get("winlog", {}).get("channel") or
+        source.get("event", {}).get("module") or
+        "Unknown"
+    )
+    
+    # Extract log level
+    log_level = (
+        source.get("log", {}).get("level") or
+        source.get("winlog", {}).get("level") or
+        "info"
+    )
+    
+    # Build description
+    description = source.get("message", "No description available")
+    if len(description) > 250:
+        first_paragraph = description.split("\n\n")[0]
+        if first_paragraph and len(first_paragraph) <= 250:
+            description = first_paragraph
+        else:
+            description = description[:250] + "..."
+    
+    # Extract platform
+    platform = (
+        source.get("host", {}).get("os", {}).get("family") or
+        source.get("host", {}).get("os", {}).get("platform") or
+        "Windows"
+    )
+    
+    return {
+        "id": hit["_id"],
+        "technique_id": f"Event-{event_code}",
+        "technique_name": event_info["category"],
+        "tactic": EVENT_TACTIC_MAP.get(event_code, "Discovery"),
+        "description": description,
+        "severity": event_info["severity"],
+        "timestamp": source.get("@timestamp", datetime.utcnow().isoformat()),
+        "platform": [platform],
+        "event_code": event_code,
+        "host_name": host_name,
+        "user_name": user_name,
+        "process_name": process_name,
+        "log_level": log_level,
+        "channel": channel,
+    }
+
+@app.get("/")
+async def root():
+    """API health check"""
+    return {
+        "status": "ok",
+        "service": "MITRE ATT&CK Security Events API",
+        "version": "1.0.0",
+        "elasticsearch": {
+            "connected": es.ping(),
+            "url": ES_URL
+        }
+    }
+
+@app.post("/api/search")
+async def search_events(
+    index: str = Query(..., description="Elasticsearch index pattern"),
+    request: SearchRequest = SearchRequest()
+):
+    """Search Windows events and map to MITRE ATT&CK"""
+    try:
+        # Build Elasticsearch query
+        query = {"bool": {"must": []}}
+        
+        if request.search:
+            query["bool"]["must"].append({
+                "multi_match": {
+                    "query": request.search,
+                    "fields": [
+                        "event.code",
+                        "message",
+                        "winlog.event_data.*",
+                        "host.name",
+                        "user.name"
+                    ],
+                    "fuzziness": "AUTO"
+                }
+            })
+        
+        # Execute search
+        body = {
+            "query": query if query["bool"]["must"] else {"match_all": {}},
+            "size": request.size,
+            "sort": [{"@timestamp": {"order": "desc"}}]
+        }
+        
+        response = es.search(index=index, body=body)
+        
+        # Map events to MITRE format
+        events = [map_event_to_mitre(hit) for hit in response["hits"]["hits"]]
+        
+        # Apply filters
+        if request.tactic and request.tactic != "all":
+            events = [e for e in events if e["tactic"] == request.tactic]
+        
+        if request.severity and request.severity != "all":
+            events = [e for e in events if e["severity"] == request.severity]
+        
+        return {
+            "total": len(events),
+            "events": events,
+            "took": response["took"],
+            "timed_out": response["timed_out"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stats")
+async def get_statistics(index: str = Query(...)):
+    """Get statistics about security events"""
+    try:
+        response = es.search(
+            index=index,
+            body={
+                "size": 0,
+                "aggs": {
+                    "event_codes": {
+                        "terms": {"field": "event.code", "size": 20}
+                    },
+                    "hosts": {
+                        "terms": {"field": "host.name.keyword", "size": 10}
+                    },
+                    "users": {
+                        "terms": {"field": "user.name.keyword", "size": 10}
+                    }
+                }
+            }
+        )
+        
+        return {
+            "total_events": response["hits"]["total"]["value"],
+            "top_event_codes": response["aggregations"]["event_codes"]["buckets"],
+            "top_hosts": response["aggregations"]["hosts"]["buckets"],
+            "top_users": response["aggregations"]["users"]["buckets"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tactics")
+async def get_tactics():
+    """Get all MITRE ATT&CK tactics"""
+    unique_tactics = sorted(set(EVENT_TACTIC_MAP.values()))
+    return {"tactics": unique_tactics}
+
+@app.get("/api/health")
+async def health_check():
+    """Detailed health check"""
+    es_healthy = es.ping()
+    return {
+        "status": "healthy" if es_healthy else "unhealthy",
+        "elasticsearch": {
+            "connected": es_healthy,
+            "url": ES_URL,
+            "cluster_name": es.info()["cluster_name"] if es_healthy else None
+        },
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
