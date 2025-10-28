@@ -15,7 +15,7 @@ export interface MultiIndexStatsRequest {
   tactic?: string;
   severity?: string;
   dayRange?: number;
-  indexPattern: string;
+  indexPattern: string; // "palo-xsiam-*" or "crowdstrike-*"
 }
 
 export interface MultiIndexTechniqueRequest {
@@ -48,6 +48,7 @@ export interface MultiIndexSearchResult {
   }>;
 }
 
+// MultiIndexStats uses array for tactics instead of number
 export interface MultiIndexStats {
   total: number;
   critical: number;
@@ -65,11 +66,11 @@ export interface MultiIndexStats {
 }
 
 // ===========================
-// Types for Unified Endpoints
+// Types for Unified Endpoints (NEW)
 // ===========================
 
 export interface UnifiedTechniqueRequest {
-  indices: string[];
+  indices: string[]; // Array of index patterns
   techniques: Array<{
     id: string;
     eventIds: number[];
@@ -81,7 +82,7 @@ export interface UnifiedTechniqueRequest {
 }
 
 export interface UnifiedTechniqueStats extends TechniqueStatsFramework {
-  sources: Record<string, number>;
+  sources: Record<string, number>; // Index pattern -> count
 }
 
 export interface UnifiedStatsRequest {
@@ -98,9 +99,9 @@ export interface UnifiedStats {
     id: string;
     name: string;
     count: number;
-    sources: Record<string, number>;
+    sources: Record<string, number>; // Index pattern -> count
   }>;
-  sources: Record<string, number>;
+  sources: Record<string, number>; // Index pattern -> total count
   breakdown: Array<{
     index: string;
     total: number;
@@ -123,7 +124,7 @@ export interface UnifiedSearchResult {
   size: number;
   results: Array<{
     id: string;
-    index: string;
+    index: string; // Which index this result came from
     timestamp: string;
     tactic?: string;
     tacticId?: string;
@@ -133,78 +134,7 @@ export interface UnifiedSearchResult {
     host?: string;
     message?: string;
   }>;
-  sources: string[];
-}
-
-// ===========================
-// Types for Top Techniques
-// ===========================
-
-export interface TopTechniqueResult {
-  technique_id: string;
-  technique_name: string;
-  count: number;
-  tactic_ids: string[];
-  tactic_names: string[];
-  sources: Record<string, number>;
-}
-
-export interface TopTechniquesResponse {
-  techniques: TopTechniqueResult[];
-  total_detections: number;
-  time_range: {
-    start: string;
-    end: string;
-  };
-  limit: number;
-  tactic_filter: string;
-}
-
-export interface TopTechniquesRequest {
-  indices: string[];
-  dayRange?: number;
-  limit?: number;
-  tactic?: string;
-}
-
-// ===========================
-// Types for Kill Chain Coverage
-// ===========================
-
-export interface TechniqueInTactic {
-  technique_id: string;
-  technique_name: string;
-  count: number;
-  sources: Record<string, number>;
-}
-
-export interface TacticCoverage {
-  tactic_id: string;
-  tactic_name: string;
-  techniques_detected: number;
-  total_detections: number;
-  top_techniques: TechniqueInTactic[];
-  coverage_percentage: number;
-  sources: Record<string, number>;
-  available_techniques: number;
-}
-
-export interface KillChainResponse {
-  tactics: TacticCoverage[];
-  total_detections: number;
-  unique_techniques: number;
-  total_tactics: number;
-  time_range: {
-    start: string;
-    end: string;
-  };
-  indices_queried: string[];
-}
-
-export interface KillChainRequest {
-  indices: string[];
-  dayRange?: number;
-  search?: string | null;
+  sources: string[]; // List of indices that were queried
 }
 
 // ===========================
@@ -222,9 +152,11 @@ export function detectIndexPattern(esIndex: string): string {
   } else if (indexLower.includes('crowdstrike')) {
     return 'crowdstrike';
   } else if (indexLower.includes('winlog') || indexLower.includes('windows')) {
+    // Windows event logs - use legacy endpoint
     return 'windows';
   }
   
+  // Default to windows for unknown patterns (backward compatible)
   console.warn(`Unknown index pattern: ${esIndex}, defaulting to legacy Windows endpoint`);
   return 'windows';
 }
@@ -248,6 +180,7 @@ function formatDateForES(date: Date): string {
 
 /**
  * Convert MultiIndexStats to legacy MitreStats format
+ * Useful for components expecting the old format
  */
 export function convertToLegacyStats(stats: MultiIndexStats): MitreStats {
   return {
@@ -256,7 +189,7 @@ export function convertToLegacyStats(stats: MultiIndexStats): MitreStats {
     high: stats.high,
     medium: stats.medium,
     low: stats.low,
-    tactics: stats.tactics.length,
+    tactics: stats.tactics.length, // Convert array to count
   };
 }
 
@@ -280,11 +213,12 @@ export function convertToMultiIndexStats(
 
 /**
  * Convert UnifiedStats to MultiIndexStats format
+ * For backward compatibility with components expecting MultiIndexStats
  */
 export function convertUnifiedToMultiIndexStats(stats: UnifiedStats): MultiIndexStats {
   return {
     total: stats.total,
-    critical: 0,
+    critical: 0, // Unified stats don't have severity breakdown by default
     high: 0,
     medium: 0,
     low: 0,
@@ -300,6 +234,13 @@ export function convertUnifiedToMultiIndexStats(stats: UnifiedStats): MultiIndex
 /**
  * Fetch technique statistics across multiple index patterns
  * Combines data from Palo Alto XSIAM, CrowdStrike, and other supported sources
+ * 
+ * @example
+ * const stats = await fetchUnifiedTechniqueStats(
+ *   techniques,
+ *   ['palo-xsiam-*', 'crowdstrike-*'],
+ *   { start: '2024-01-01', end: '2024-01-31' }
+ * );
  */
 export const fetchUnifiedTechniqueStats = async (
   techniques: MitreTechniqueFramework[],
@@ -307,6 +248,7 @@ export const fetchUnifiedTechniqueStats = async (
   dateRange: { start: string; end: string }
 ): Promise<Record<string, UnifiedTechniqueStats>> => {
   try {
+    // Filter out Windows indices
     const validIndices = filterValidIndices(indices);
     
     if (validIndices.length === 0) {
@@ -314,17 +256,20 @@ export const fetchUnifiedTechniqueStats = async (
       return {};
     }
 
+    // Prepare payload
     const techniquesPayload = techniques.map(tech => ({
       id: tech.id,
       eventIds: tech.eventIds || [],
     }));
 
+    // Format date range
     const startDate = new Date(dateRange.start);
     startDate.setHours(0, 0, 0, 0);
     
     const endDate = new Date(dateRange.end);
     endDate.setHours(23, 59, 59, 999);
 
+    // Call unified endpoint
     const response = await fetch(`${BACKEND_API_URL}/api/unified/technique-stats`, {
       method: 'POST',
       headers: {
@@ -356,6 +301,13 @@ export const fetchUnifiedTechniqueStats = async (
 
 /**
  * Fetch overall statistics across multiple index patterns
+ * Returns aggregated counts by tactic with source breakdown
+ * 
+ * @example
+ * const stats = await fetchUnifiedStats(
+ *   ['palo-xsiam-*', 'crowdstrike-*'],
+ *   { search: 'malware', tactic: 'all', dayRange: 7 }
+ * );
  */
 export async function fetchUnifiedStats(
   indices: string[],
@@ -367,6 +319,7 @@ export async function fetchUnifiedStats(
   }
 ): Promise<UnifiedStats> {
   try {
+    // Filter out Windows indices
     const validIndices = filterValidIndices(indices);
     
     if (validIndices.length === 0) {
@@ -412,6 +365,13 @@ export async function fetchUnifiedStats(
 
 /**
  * Search MITRE detections across multiple index patterns
+ * Combines results and sorts by timestamp
+ * 
+ * @example
+ * const results = await searchUnified(
+ *   ['palo-xsiam-*', 'crowdstrike-*'],
+ *   { search: 'suspicious', size: 20, page: 1 }
+ * );
  */
 export async function searchUnified(
   indices: string[],
@@ -424,6 +384,7 @@ export async function searchUnified(
   }
 ): Promise<UnifiedSearchResult> {
   try {
+    // Filter out Windows indices
     const validIndices = filterValidIndices(indices);
     
     if (validIndices.length === 0) {
@@ -470,265 +431,37 @@ export async function searchUnified(
   }
 }
 
-/**
- * Fetch top N most detected techniques across multiple index patterns
- */
-export async function fetchTopTechniques(
-  indices: string[],
-  options: {
-    dayRange?: number;
-    limit?: number;
-    tactic?: string;
-  } = {}
-): Promise<TopTechniquesResponse> {
-  try {
-    const validIndices = filterValidIndices(indices);
-    
-    if (validIndices.length === 0) {
-      console.error('No valid indices provided for top techniques endpoint');
-      return {
-        techniques: [],
-        total_detections: 0,
-        time_range: { start: '', end: '' },
-        limit: options.limit || 5,
-        tactic_filter: options.tactic || 'all'
-      };
-    }
-
-    const response = await fetch(`${BACKEND_API_URL}/api/unified/top-techniques`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        indices: validIndices,
-        dayRange: options.dayRange || 7,
-        limit: options.limit || 5,
-        tactic: options.tactic || 'all',
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Backend API error for top techniques: ${response.status} - ${errorText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    console.error('Error fetching top techniques:', error);
-    return {
-      techniques: [],
-      total_detections: 0,
-      time_range: { start: '', end: '' },
-      limit: options.limit || 5,
-      tactic_filter: options.tactic || 'all'
-    };
-  }
-}
-
-/**
- * Fetch complete MITRE ATT&CK kill chain coverage across multiple index patterns
- * Maps all detections to tactics with detailed technique-level information
- * 
- * @example
- * const killChain = await fetchKillChainCoverage(
- *   ['palo-xsiam-*', 'crowdstrike-*'],
- *   { dayRange: 7, search: null }
- * );
- */
-export async function fetchKillChainCoverage(
-  indices: string[],
-  options: {
-    dayRange?: number;
-    search?: string | null;
-  } = {}
-): Promise<KillChainResponse> {
-  try {
-    const validIndices = filterValidIndices(indices);
-    
-    if (validIndices.length === 0) {
-      console.error('No valid indices provided for kill chain endpoint');
-      return {
-        tactics: [],
-        total_detections: 0,
-        unique_techniques: 0,
-        total_tactics: 0,
-        time_range: { start: '', end: '' },
-        indices_queried: []
-      };
-    }
-
-    const response = await fetch(`${BACKEND_API_URL}/api/unified/kill-chain`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        indices: validIndices,
-        dayRange: options.dayRange || 7,
-        search: options.search || null,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Backend API error for kill chain: ${response.status} - ${errorText}`);
-    }
-
-    const data: KillChainResponse = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error fetching kill chain coverage:', error);
-    return {
-      tactics: [],
-      total_detections: 0,
-      unique_techniques: 0,
-      total_tactics: 0,
-      time_range: { start: '', end: '' },
-      indices_queried: []
-    };
-  }
-}
-
-// ===========================
-// Kill Chain Helper Functions
-// ===========================
-
-/**
- * Get kill chain coverage summary statistics
- */
-export function getKillChainSummary(killChain: KillChainResponse): {
-  activeTactics: number;
-  totalTactics: number;
-  averageCoverage: number;
-  highestTactic: TacticCoverage | null;
-  lowestCoverage: TacticCoverage | null;
-  totalDetections: number;
-  uniqueTechniques: number;
-} {
-  const activeTactics = killChain.tactics.filter(t => t.total_detections > 0);
-  
-  const averageCoverage = activeTactics.length > 0
-    ? activeTactics.reduce((sum, t) => sum + t.coverage_percentage, 0) / activeTactics.length
-    : 0;
-  
-  const highestTactic = activeTactics.length > 0
-    ? activeTactics.reduce((max, t) => 
-        t.total_detections > max.total_detections ? t : max
-      )
-    : null;
-  
-  const lowestCoverage = activeTactics.length > 0
-    ? activeTactics.reduce((min, t) => 
-        t.coverage_percentage < min.coverage_percentage ? t : min
-      )
-    : null;
-  
-  return {
-    activeTactics: activeTactics.length,
-    totalTactics: killChain.tactics.length,
-    averageCoverage: Math.round(averageCoverage * 100) / 100,
-    highestTactic,
-    lowestCoverage,
-    totalDetections: killChain.total_detections,
-    uniqueTechniques: killChain.unique_techniques
-  };
-}
-
-/**
- * Filter kill chain data by minimum detection threshold
- */
-export function filterKillChainByThreshold(
-  killChain: KillChainResponse,
-  minDetections: number
-): TacticCoverage[] {
-  return killChain.tactics.filter(t => t.total_detections >= minDetections);
-}
-
-/**
- * Get tactics with zero coverage (no detections)
- */
-export function getBlindSpots(killChain: KillChainResponse): TacticCoverage[] {
-  return killChain.tactics.filter(t => t.total_detections === 0);
-}
-
-/**
- * Sort tactics by detection count (descending)
- */
-export function sortTacticsByActivity(tactics: TacticCoverage[]): TacticCoverage[] {
-  return [...tactics].sort((a, b) => b.total_detections - a.total_detections);
-}
-
-/**
- * Sort tactics by coverage percentage (descending)
- */
-export function sortTacticsByCoverage(tactics: TacticCoverage[]): TacticCoverage[] {
-  return [...tactics].sort((a, b) => b.coverage_percentage - a.coverage_percentage);
-}
-
-/**
- * Get color coding for coverage percentage
- */
-export function getCoverageColor(coveragePercent: number): {
-  color: string;
-  label: string;
-} {
-  if (coveragePercent === 0) {
-    return { color: '#94a3b8', label: 'No Coverage' };
-  } else if (coveragePercent < 25) {
-    return { color: '#ef4444', label: 'Low Coverage' };
-  } else if (coveragePercent < 50) {
-    return { color: '#f97316', label: 'Fair Coverage' };
-  } else if (coveragePercent < 75) {
-    return { color: '#eab308', label: 'Good Coverage' };
-  } else {
-    return { color: '#22c55e', label: 'Excellent Coverage' };
-  }
-}
-
-/**
- * Format kill chain data for heatmap visualization
- */
-export function formatForHeatmap(killChain: KillChainResponse): Array<{
-  tactic: string;
-  value: number;
-  coverage: number;
-  color: string;
-}> {
-  return killChain.tactics.map(tactic => {
-    const { color } = getCoverageColor(tactic.coverage_percentage);
-    return {
-      tactic: tactic.tactic_name,
-      value: tactic.total_detections,
-      coverage: tactic.coverage_percentage,
-      color
-    };
-  });
-}
-
 // ===========================
 // Multi-Index API Functions (Single Index Pattern)
 // ===========================
 
+/**
+ * Fetch technique statistics for multiple techniques across different index patterns
+ * Works with both Palo Alto XSIAM and CrowdStrike indices
+ */
 export const fetchMultiIndexTechniqueStats = async (
   techniques: MitreTechniqueFramework[],
   esIndex: string,
   dateRange: { start: string; end: string }
 ): Promise<Record<string, TechniqueStatsFramework>> => {
   try {
+    // Detect index pattern automatically
     const indexPattern = detectIndexPattern(esIndex);
 
+    // Prepare payload
     const techniquesPayload = techniques.map(tech => ({
       id: tech.id,
       eventIds: tech.eventIds || [],
     }));
 
+    // Format date range
     const startDate = new Date(dateRange.start);
     startDate.setHours(0, 0, 0, 0);
     
     const endDate = new Date(dateRange.end);
     endDate.setHours(23, 59, 59, 999);
 
+    // Call multi-index endpoint
     const response = await fetch(`${BACKEND_API_URL}/api/multi-index/technique-stats`, {
       method: 'POST',
       headers: {
@@ -759,6 +492,10 @@ export const fetchMultiIndexTechniqueStats = async (
   }
 };
 
+/**
+ * Fetch overall statistics across different index patterns
+ * Returns aggregated counts by tactic, severity, and categories
+ */
 export async function fetchMultiIndexStats(
   esIndex: string,
   filters: {
@@ -769,6 +506,7 @@ export async function fetchMultiIndexStats(
   }
 ): Promise<MultiIndexStats> {
   try {
+    // Detect index pattern
     const indexPattern = detectIndexPattern(esIndex);
 
     const response = await fetch(`${BACKEND_API_URL}/api/multi-index/stats`, {
@@ -798,12 +536,16 @@ export async function fetchMultiIndexStats(
       high: 0, 
       medium: 0, 
       low: 0, 
-      tactics: [],
+      tactics: [], // Return empty array instead of 0
       categories: []
     };
   }
 }
 
+/**
+ * Search MITRE detections across different index patterns
+ * Supports pagination and filtering
+ */
 export async function searchMultiIndex(
   esIndex: string,
   filters: {
@@ -852,9 +594,13 @@ export async function searchMultiIndex(
 }
 
 // ===========================
-// Legacy API Functions
+// Legacy API Functions (for backward compatibility)
 // ===========================
 
+/**
+ * Legacy function - uses original endpoint
+ * Use fetchMultiIndexTechniqueStats for multi-index support
+ */
 export const fetchAllTechniqueStatsWithDateRange = async (
   techniques: MitreTechniqueFramework[],
   esIndex: string,
@@ -901,6 +647,10 @@ export const fetchAllTechniqueStatsWithDateRange = async (
   }
 };
 
+/**
+ * Legacy function - uses original endpoint
+ * Use fetchMultiIndexStats for multi-index support
+ */
 export async function fetchStats(
   esIndex: string,
   filters: {
@@ -936,9 +686,13 @@ export async function fetchStats(
 }
 
 // ===========================
-// Smart API Functions
+// Smart API Functions (Auto-detect endpoint)
 // ===========================
 
+/**
+ * Universal technique stats fetcher
+ * Automatically chooses the right endpoint based on index pattern
+ */
 export const fetchTechniqueStats = async (
   techniques: MitreTechniqueFramework[],
   esIndex: string,
@@ -957,6 +711,11 @@ export const fetchTechniqueStats = async (
   return await fetchAllTechniqueStatsWithDateRange(techniques, esIndex, dateRange);
 };
 
+/**
+ * Universal stats fetcher
+ * Automatically chooses the right endpoint based on index pattern
+ * Returns MultiIndexStats (with tactics array) by default
+ */
 export const fetchStatsUnified = async (
   esIndex: string,
   filters: {
@@ -974,6 +733,7 @@ export const fetchStatsUnified = async (
     } catch (error) {
       console.warn('Multi-index not supported, falling back to legacy endpoint');
       const legacyStats = await fetchStats(esIndex, filters);
+      // Convert legacy format to multi-index format
       return convertToMultiIndexStats(legacyStats);
     }
   }
@@ -981,28 +741,120 @@ export const fetchStatsUnified = async (
   return convertToMultiIndexStats(legacyStats);
 };
 
+// Add these types near the other type definitions
+
+export interface TopTechniqueResult {
+  technique_id: string;
+  technique_name: string;
+  count: number;
+  tactic_ids: string[];
+  tactic_names: string[];
+  sources: Record<string, number>;
+}
+
+export interface TopTechniquesResponse {
+  techniques: TopTechniqueResult[];
+  total_detections: number;
+  time_range: {
+    start: string;
+    end: string;
+  };
+  limit: number;
+  tactic_filter: string;
+}
+
+export interface TopTechniquesRequest {
+  indices: string[];
+  dayRange?: number;
+  limit?: number;
+  tactic?: string;
+}
+
+
+/**
+ * Fetch top N most detected techniques across multiple index patterns
+ * Returns techniques ranked by detection count with source breakdown
+ * 
+ * @example
+ * const topTechs = await fetchTopTechniques(
+ *   ['palo-xsiam-*', 'crowdstrike-*'],
+ *   { dayRange: 7, limit: 5, tactic: 'all' }
+ * );
+ */
+export async function fetchTopTechniques(
+  indices: string[],
+  options: {
+    dayRange?: number;
+    limit?: number;
+    tactic?: string;
+  } = {}
+): Promise<TopTechniquesResponse> {
+  try {
+    // Filter out Windows indices
+    const validIndices = filterValidIndices(indices);
+    
+    if (validIndices.length === 0) {
+      console.error('No valid indices provided for top techniques endpoint');
+      return {
+        techniques: [],
+        total_detections: 0,
+        time_range: { start: '', end: '' },
+        limit: options.limit || 5,
+        tactic_filter: options.tactic || 'all'
+      };
+    }
+
+    const response = await fetch(`${BACKEND_API_URL}/api/unified/top-techniques`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        indices: validIndices,
+        dayRange: options.dayRange || 7,
+        limit: options.limit || 5,
+        tactic: options.tactic || 'all',
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Backend API error for top techniques: ${response.status} - ${errorText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching top techniques:', error);
+    return {
+      techniques: [],
+      total_detections: 0,
+      time_range: { start: '', end: '' },
+      limit: options.limit || 5,
+      tactic_filter: options.tactic || 'all'
+    };
+  }
+}
+
 // ===========================
-// Export
+// Export all functions
 // ===========================
 
 export default {
-  // Unified (Recommended)
+  // Unified (NEW - Recommended for multiple indices)
   fetchUnifiedTechniqueStats,
   fetchUnifiedStats,
   searchUnified,
-  fetchTopTechniques,
-  fetchKillChainCoverage,
   
-  // Multi-Index
+  // Multi-Index (Single index pattern)
   fetchMultiIndexTechniqueStats,
   fetchMultiIndexStats,
   searchMultiIndex,
   
-  // Legacy
+  // Legacy (Backward Compatible)
   fetchAllTechniqueStatsWithDateRange,
   fetchStats,
   
-  // Smart
+  // Smart (Auto-detect)
   fetchTechniqueStats,
   fetchStatsUnified,
   
@@ -1012,13 +864,7 @@ export default {
   convertToLegacyStats,
   convertToMultiIndexStats,
   convertUnifiedToMultiIndexStats,
-  
-  // Kill Chain Helpers
-  getKillChainSummary,
-  filterKillChainByThreshold,
-  getBlindSpots,
-  sortTacticsByActivity,
-  sortTacticsByCoverage,
-  getCoverageColor,
-  formatForHeatmap,
+
+  // Top ten
+  fetchTopTechniques
 };

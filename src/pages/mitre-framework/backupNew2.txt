@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Shield, Search, RefreshCw, Calendar, Layers, Grid3x3, BarChart3, TrendingUp } from "lucide-react";
+import { Shield, Search, RefreshCw, Calendar } from "lucide-react";
 import TechniqueCard from "../../components/mitreCard/TechniqueCard";
 import TechniqueModal from "../../components/mitreCard/TechniqueModal";
 import type {
@@ -9,20 +9,17 @@ import type {
 } from "../../types/mitre";
 import { loadMitreData } from "../../components/mitreCard/mitreData";
 import { getSeverityColor } from "../../components/mitreCard/mitreData";
+import {
+  fetchAllTechniqueStatsWithDateRange,
+  fetchStats,
+} from "../../services/mitreService";
 
 import {
-  fetchUnifiedTechniqueStats,
-  fetchUnifiedStats,
-  filterValidIndices,
-  type UnifiedTechniqueStats,
-  type UnifiedStats,
+  fetchMultiIndexTechniqueStats,
+  fetchMultiIndexStats,
+  detectIndexPattern,
+  convertToLegacyStats
 } from "../../services/multiMitreService";
-import { fetchAllTechniqueStatsWithDateRange, fetchStats } from "../../services/mitreService";
-import SummaryView from "../../components/mitreCard/SummaryView";
-import KillChainDashboard from "../../components/mitreCard/KillChainDashboard";
-import KillChainCircular from "../../components/mitreCard/killchainCircular";
-
-type ViewMode = "matrix" | "summary" | "kill chain";
 
 const MitreAttackNavigator: React.FC = () => {
   const [selectedTechnique, setSelectedTechnique] =
@@ -35,7 +32,7 @@ const MitreAttackNavigator: React.FC = () => {
   const [tactics, setTactics] = useState<MitreTacticFramework[]>([]);
   const [techniques, setTechniques] = useState<MitreTechniqueFramework[]>([]);
   const [techniqueStats, setTechniqueStats] = useState<
-    Record<string, UnifiedTechniqueStats>
+    Record<string, TechniqueStatsFramework>
   >({});
   const [dateRange, setDateRange] = useState({
     start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
@@ -44,16 +41,14 @@ const MitreAttackNavigator: React.FC = () => {
     end: new Date().toISOString().split("T")[0],
   });
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [stats, setStats] = useState<UnifiedStats>({
+  const [stats, setStats] = useState({
     total: 0,
-    tactics: [],
-    sources: {},
-    breakdown: [],
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    tactics: 0,
   });
-
-  // ✨ NEW: State for dropdown visibility
-  const [showDropdown, setShowDropdown] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("matrix");
 
   const datePresets = [
     { label: "Last 24h", hours: 24 },
@@ -62,19 +57,22 @@ const MitreAttackNavigator: React.FC = () => {
     { label: "Last 90d", days: 90 },
   ];
 
-  // NEW: Support multiple indices
-  const [selectedIndices, setSelectedIndices] = useState<string[]>([
-    "palo-xsiam-*",
-    "crowdstrike-*",
-  ]);
+  const [selectedIndex, setSelectedIndex] = useState<string>(
+    ".ds-winlogbeat-9.1.5-*"
+  );
 
   const availableIndices = [
+    { value: ".ds-winlogbeat-9.1.5-*", label: "Windows Events" },
     { value: "palo-xsiam-*", label: "Palo Alto XSIAM" },
     { value: "crowdstrike-*", label: "CrowdStrike" },
-    { value: ".ds-winlogbeat-9.1.5-*", label: "WinlogBeat" },
-    { value: "custom-logs-*", label: "Custom Logs" },
   ];
 
+  const esIndex = selectedIndex;
+
+  const isWindowsIndex = (index: string): boolean => {
+    const pattern = detectIndexPattern(index);
+    return pattern === 'windows';
+  };
 
   // Helper function to check if a technique is a parent (no dot in ID)
   const isParentTechnique = (techniqueId: string): boolean => {
@@ -87,22 +85,26 @@ const MitreAttackNavigator: React.FC = () => {
     return match ? match[1] : null;
   };
 
-  // ✨ NEW: Toggle function for dropdown
-  const toggleDropdown = () => {
-    setShowDropdown(prev => !prev);
-  };
+  // Group techniques by parent
+  const groupTechniques = (allTechniques: MitreTechniqueFramework[]) => {
+    const parentTechniques = allTechniques.filter(t => isParentTechnique(t.id));
+    const subTechniques = allTechniques.filter(t => !isParentTechnique(t.id));
 
-  // ✨ NEW: Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const dropdown = document.getElementById("source-dropdown");
-      if (dropdown && !dropdown.contains(event.target as Node)) {
-        setShowDropdown(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+    // Create a map of parent -> sub-techniques
+    const techniqueMap = new Map<string, {
+      parent: MitreTechniqueFramework;
+      children: MitreTechniqueFramework[];
+    }>();
+
+    parentTechniques.forEach(parent => {
+      const children = subTechniques.filter(sub => 
+        getParentTechniqueId(sub.id) === parent.id
+      );
+      techniqueMap.set(parent.id, { parent, children });
+    });
+
+    return techniqueMap;
+  };
 
   useEffect(() => {
     loadData();
@@ -132,18 +134,38 @@ const MitreAttackNavigator: React.FC = () => {
 
   const loadStats = async (techniquesData: MitreTechniqueFramework[]) => {
     try {
-      console.log("🚀 Using Unified Endpoint for multiple indices:", selectedIndices);
+      let stats: Record<string, TechniqueStatsFramework>;
 
-      const stats = await fetchUnifiedTechniqueStats(
-        techniquesData,
-        selectedIndices,
-        dateRange
-      );
+      if (isWindowsIndex(esIndex)) {
+        console.log("🪟 Using Legacy Endpoint for Windows Events");
+        stats = await fetchAllTechniqueStatsWithDateRange(
+          techniquesData,
+          esIndex,
+          dateRange
+        );
+      } else {
+        console.log("🚀 Using Multi-Index Endpoint for", detectIndexPattern(esIndex));
+        stats = await fetchMultiIndexTechniqueStats(
+          techniquesData,
+          esIndex,
+          dateRange
+        );
+      }
 
       setTechniqueStats(stats);
     } catch (error) {
-      console.error("Error loading unified stats:", error);
-      setTechniqueStats({});
+      console.error("Error loading stats:", error);
+      try {
+        const fallbackStats = await fetchAllTechniqueStatsWithDateRange(
+          techniquesData,
+          esIndex,
+          dateRange
+        );
+        setTechniqueStats(fallbackStats);
+      } catch (fallbackError) {
+        console.error("Fallback also failed:", fallbackError);
+        setTechniqueStats({});
+      }
     }
   };
 
@@ -151,22 +173,36 @@ const MitreAttackNavigator: React.FC = () => {
     try {
       const dayRange = getDaysInRange();
 
-      console.log("🚀 Fetching unified stats from multiple sources");
-      const statsData = await fetchUnifiedStats(selectedIndices, {
-        search: undefined,
-        tactic: "all",
-        severity: "all",
-        dayRange: dayRange,
-      });
+      if (isWindowsIndex(esIndex)) {
+        console.log("🪟 Fetching Windows stats from legacy endpoint");
+        const statsData = await fetchStats(esIndex, {
+          search: undefined,
+          tactic: "all",
+          severity: "all",
+          dayRange: dayRange,
+        });
+        setStats(statsData);
+      } else {
+        console.log("🚀 Fetching stats from multi-index endpoint");
+        const statsData = await fetchMultiIndexStats(esIndex, {
+          search: undefined,
+          tactic: "all",
+          severity: "all",
+          dayRange: dayRange,
+        });
 
-      setStats(statsData);
+        const legacyStats = convertToLegacyStats(statsData);
+        setStats(legacyStats);
+      }
     } catch (error) {
       console.error("Error loading overall stats:", error);
       setStats({
         total: 0,
-        tactics: [],
-        sources: {},
-        breakdown: [],
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        tactics: 0,
       });
     }
   };
@@ -176,7 +212,7 @@ const MitreAttackNavigator: React.FC = () => {
       loadStats(techniques);
       loadOverallStats();
     }
-  }, [selectedIndices, dateRange]);
+  }, [selectedIndex, dateRange]);
 
   const handleDatePreset = (preset: {
     label: string;
@@ -219,21 +255,6 @@ const MitreAttackNavigator: React.FC = () => {
     return days;
   };
 
-  const handleIndexToggle = (indexValue: string) => {
-    setSelectedIndices((prev) => {
-      if (prev.includes(indexValue)) {
-        // Don't allow deselecting all indices
-        if (prev.length === 1) {
-          alert("At least one index must be selected");
-          return prev;
-        }
-        return prev.filter((idx) => idx !== indexValue);
-      } else {
-        return [...prev, indexValue];
-      }
-    });
-  };
-
   const filteredTechniques = techniques.filter((tech) => {
     const matchesSearch =
       tech.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -266,7 +287,6 @@ const MitreAttackNavigator: React.FC = () => {
           count: 0,
           severity: "none",
           lastSeen: null,
-          sources: {}
         }
       }));
   };
@@ -278,22 +298,6 @@ const MitreAttackNavigator: React.FC = () => {
 
   // Count only parent techniques for display
   const parentTechniquesCount = techniques.filter(t => isParentTechnique(t.id)).length;
-
-  // Calculate aggregated severity counts from unified stats
-  const getSeverityCounts = () => {
-    const counts = { critical: 0, high: 0, medium: 0, low: 0 };
-
-    Object.values(techniqueStats).forEach(stat => {
-      if (stat.count > 0) {
-        counts[stat.severity as keyof typeof counts] =
-          (counts[stat.severity as keyof typeof counts] || 0) + stat.count;
-      }
-    });
-
-    return counts;
-  };
-
-  const severityCounts = getSeverityCounts();
 
   if (loading) {
     return (
@@ -325,47 +329,17 @@ const MitreAttackNavigator: React.FC = () => {
               </div>
             </div>
             <div className="flex gap-2">
-              {/* ✨ UPDATED: Click-to-toggle dropdown instead of hover */}
-              <div className="relative" id="source-dropdown">
-                <button
-                  onClick={toggleDropdown}
-                  className="px-3 py-1.5 bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors text-sm flex items-center gap-2"
-                >
-                  <Layers className="w-4 h-4" />
-                  {selectedIndices.length} Sources
-                </button>
-
-                {/* Index Selection Dropdown - Now controlled by showDropdown state */}
-                {showDropdown && (
-                  <div className="absolute right-0 mt-2 bg-gray-700 rounded-lg shadow-xl p-3 z-50 w-64">
-                    <div className="text-white text-sm font-bold mb-2">
-                      Data Sources
-                    </div>
-                    <div className="space-y-2">
-                      {availableIndices.map((idx) => (
-                        <label
-                          key={idx.value}
-                          className="flex items-center gap-2 cursor-pointer hover:bg-gray-600 p-2 rounded"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selectedIndices.includes(idx.value)}
-                            onChange={() => handleIndexToggle(idx.value)}
-                            className="w-4 h-4 text-red-600 bg-gray-600 border-gray-500 rounded focus:ring-red-500"
-                          />
-                          <span className="text-white text-sm">{idx.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <div className="mt-3 pt-3 border-t border-gray-600">
-                      <div className="text-xs text-gray-400">
-                        Selected: {selectedIndices.length} of {availableIndices.length}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
+              <select
+                value={selectedIndex}
+                onChange={(e) => setSelectedIndex(e.target.value)}
+                className="px-3 py-1.5 bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors text-sm focus:outline-none focus:ring-1 focus:ring-red-500"
+              >
+                {availableIndices.map((idx) => (
+                  <option key={idx.value} value={idx.value}>
+                    {idx.label}
+                  </option>
+                ))}
+              </select>
               <div className="relative">
                 <button
                   onClick={() => setShowDatePicker(!showDatePicker)}
@@ -451,69 +425,6 @@ const MitreAttackNavigator: React.FC = () => {
             </div>
           </div>
 
-          {/* View Mode Tabs */}
-          <div className="flex gap-2 mb-4 border-b border-gray-700">
-            <button
-              onClick={() => setViewMode("matrix")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${viewMode === "matrix"
-                ? "text-white border-b-2 border-red-500"
-                : "text-gray-400 hover:text-white"
-                }`}
-            >
-              <Grid3x3 className="w-4 h-4" />
-              Matrix View
-            </button>
-            <button
-              onClick={() => setViewMode("summary")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${viewMode === "summary"
-                ? "text-white border-b-2 border-red-500"
-                : "text-gray-400 hover:text-white"
-                }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              Analytics
-            </button>
-            <button
-              onClick={() => setViewMode("kill chain")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${viewMode === "kill chain"
-                ? "text-white border-b-2 border-red-500"
-                : "text-gray-400 hover:text-white"
-                }`}
-            >
-              <TrendingUp className="w-4 h-4" />
-              Kill Chain Statistics
-            </button>
-          </div>
-
-          {viewMode === "matrix" && (
-            <> </>
-          )}
-
-
-          {/* Data Sources Breakdown */}
-          <div className="bg-gray-900 rounded p-3 mb-4">
-            <div className="text-gray-400 text-xs mb-2 font-semibold">
-              Active Data Sources
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {selectedIndices.map((indexPattern) => {
-                const count = stats.sources[indexPattern] || 0;
-                const label = availableIndices.find(idx => idx.value === indexPattern)?.label || indexPattern;
-                return (
-                  <div
-                    key={indexPattern}
-                    className="bg-gray-800 rounded p-2 flex justify-between items-center"
-                  >
-                    <span className="text-white text-xs">{label}</span>
-                    <span className="text-red-400 font-bold text-sm">
-                      {count.toLocaleString()}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="bg-gray-900 rounded p-3">
               <div className="text-gray-400 text-xs mb-1">
@@ -524,9 +435,10 @@ const MitreAttackNavigator: React.FC = () => {
               </div>
             </div>
             <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">Active Sources</div>
-              <div className="text-2xl font-bold text-white">
-                {selectedIndices.length}
+              <div className="text-gray-400 text-xs mb-1">Data Source</div>
+              <div className="text-sm font-bold text-white truncate">
+                {availableIndices.find((idx) => idx.value === selectedIndex)
+                  ?.label || selectedIndex}
               </div>
             </div>
             <div className="bg-gray-900 rounded p-3">
@@ -545,25 +457,25 @@ const MitreAttackNavigator: React.FC = () => {
                 Critical Severity
               </div>
               <div className="text-2xl font-bold text-white">
-                {severityCounts.critical.toLocaleString()}
+                {stats.critical.toLocaleString()}
               </div>
             </div>
             <div className="bg-gray-900 rounded p-3">
               <div className="text-gray-400 text-xs mb-1">High Severity</div>
               <div className="text-2xl font-bold text-white">
-                {severityCounts.high.toLocaleString()}
+                {stats.high.toLocaleString()}
               </div>
             </div>
             <div className="bg-gray-900 rounded p-3">
               <div className="text-gray-400 text-xs mb-1">Medium Severity</div>
               <div className="text-2xl font-bold text-white">
-                {severityCounts.medium.toLocaleString()}
+                {stats.medium.toLocaleString()}
               </div>
             </div>
             <div className="bg-gray-900 rounded p-3">
               <div className="text-gray-400 text-xs mb-1">Low Severity</div>
               <div className="text-2xl font-bold text-white">
-                {severityCounts.low.toLocaleString()}
+                {stats.low.toLocaleString()}
               </div>
             </div>
           </div>
@@ -605,110 +517,86 @@ const MitreAttackNavigator: React.FC = () => {
             ))}
           </div>
         </div>
-        {viewMode === "matrix" && (
-          <div className="bg-gray-800 rounded-lg shadow-xl p-3 overflow-x-auto">
-            <div className="min-w-[1600px]">
-              <div
-                className="gap-1.5 mb-1.5"
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: `repeat(${tactics.length}, minmax(0, 1fr))`,
-                }}
-              >
-                {tactics.map((tactic) => {
-                  const tacticTechCount = getTechniquesForTactic(tactic.shortName).length;
-                  const detectedInTactic = getTechniquesForTactic(tactic.shortName).filter(
-                    tech => {
-                      // Check parent
-                      const parentDetected = techniqueStats[tech.id]?.count > 0;
-                      // Check any sub-technique
-                      const subDetected = getSubTechniquesForParent(tech.id).some(
-                        sub => sub.stats.count > 0
-                      );
-                      return parentDetected || subDetected;
-                    }
-                  ).length;
 
-                  return (
-                    <div
-                      key={tactic.id}
-                      className="bg-red-600 rounded-t p-2 text-center"
-                      title={`${tactic.description}\n\nParent Techniques: ${tacticTechCount}\nDetected: ${detectedInTactic}`}
-                    >
-                      <div className="text-white font-bold text-[10px] leading-tight mb-1">
-                        {tactic.name}
-                      </div>
-                      <div className="text-white text-[9px] opacity-90">
-                        {detectedInTactic}/{tacticTechCount}
-                      </div>
+        <div className="bg-gray-800 rounded-lg shadow-xl p-3 overflow-x-auto">
+          <div className="min-w-[1600px]">
+            <div
+              className="gap-1.5 mb-1.5"
+              style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${tactics.length}, minmax(0, 1fr))`,
+              }}
+            >
+              {tactics.map((tactic) => {
+                const tacticTechCount = getTechniquesForTactic(tactic.shortName).length;
+                const detectedInTactic = getTechniquesForTactic(tactic.shortName).filter(
+                  tech => {
+                    // Check parent
+                    const parentDetected = techniqueStats[tech.id]?.count > 0;
+                    // Check any sub-technique
+                    const subDetected = getSubTechniquesForParent(tech.id).some(
+                      sub => sub.stats.count > 0
+                    );
+                    return parentDetected || subDetected;
+                  }
+                ).length;
+                
+                return (
+                  <div
+                    key={tactic.id}
+                    className="bg-red-600 rounded-t p-2 text-center"
+                    title={`${tactic.description}\n\nParent Techniques: ${tacticTechCount}\nDetected: ${detectedInTactic}`}
+                  >
+                    <div className="text-white font-bold text-[10px] leading-tight mb-1">
+                      {tactic.name}
                     </div>
-                  );
-                })}
-              </div>
+                    <div className="text-white text-[9px] opacity-90">
+                      {detectedInTactic}/{tacticTechCount}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
-              <div
-                className="gap-1.5"
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: `repeat(${tactics.length}, minmax(0, 1fr))`,
-                }}
-              >
-                {tactics.map((tactic) => {
-                  const tacticTechniques = getTechniquesForTactic(
-                    tactic.shortName
-                  );
-                  return (
-                    <div key={tactic.id} className="space-y-1.5">
-                      {tacticTechniques.map((tech) => {
-                        const subTechniques = getSubTechniquesForParent(tech.id);
-                        return (
-                          <TechniqueCard
-                            key={tech.id}
-                            technique={tech}
-                            stats={
-                              techniqueStats[tech.id] || {
-                                count: 0,
-                                severity: "none",
-                                lastSeen: null,
-                                sources: {}
-                              }
+            <div
+              className="gap-1.5"
+              style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${tactics.length}, minmax(0, 1fr))`,
+              }}
+            >
+              {tactics.map((tactic) => {
+                const tacticTechniques = getTechniquesForTactic(
+                  tactic.shortName
+                );
+                return (
+                  <div key={tactic.id} className="space-y-1.5">
+                    {tacticTechniques.map((tech) => {
+                      const subTechniques = getSubTechniquesForParent(tech.id);
+                      return (
+                        <TechniqueCard
+                          key={tech.id}
+                          technique={tech}
+                          stats={
+                            techniqueStats[tech.id] || {
+                              count: 0,
+                              severity: "none",
+                              lastSeen: null,
                             }
-                            isSelected={selectedTechnique?.id === tech.id}
-                            onClick={() => setSelectedTechnique(tech)}
-                            subTechniques={subTechniques}
-                            onSubTechniqueClick={(subTech) => setSelectedTechnique(subTech)}
-                          />
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </div>
+                          }
+                          isSelected={selectedTechnique?.id === tech.id}
+                          onClick={() => setSelectedTechnique(tech)}
+                          subTechniques={subTechniques}
+                          onSubTechniqueClick={(subTech) => setSelectedTechnique(subTech)}
+                        />
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </div>
           </div>
-        )}
-
-        {viewMode === "summary" && (
-          <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <SummaryView
-              stats={stats}
-              loading={refreshing}
-              selectedIndices={selectedIndices}
-              dayRange={getDaysInRange()}
-            />
-          </div>
-        )}
-
-        {viewMode === "kill chain" && (
-          <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <KillChainDashboard
-              selectedIndices={selectedIndices}
-              dayRange={getDaysInRange()}
-            />
-            
-          </div>
-         
-        )}
+        </div>
       </div>
 
       {selectedTechnique && (
@@ -719,7 +607,6 @@ const MitreAttackNavigator: React.FC = () => {
               count: 0,
               severity: "none",
               lastSeen: null,
-              sources: {}
             }
           }
           tactics={tactics}

@@ -969,6 +969,1457 @@ async def search_multi_index(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error in multi-index search: {str(e)}")
     
+# Add these new models and endpoints to your multi_pattern.py file
+
+# ===================================
+# New Pydantic Models for Unified Endpoints
+# ===================================
+
+class UnifiedTechniqueRequest(BaseModel):
+    """Request for unified technique statistics across all index patterns"""
+    indices: List[str]  # List of index patterns to query (e.g., ["palo-xsiam-*", "crowdstrike-*"])
+    techniques: List[Technique]
+    dateRange: Optional[DateRange] = None
+
+class UnifiedStatsRequest(BaseModel):
+    """Request for unified statistics across all index patterns"""
+    indices: List[str]  # List of index patterns to query
+    search: Optional[str] = None
+    tactic: Optional[str] = "all"
+    severity: Optional[str] = "all"
+    dayRange: Optional[int] = 7
+
+class UnifiedSearchRequest(BaseModel):
+    """Request for unified search across all index patterns"""
+    indices: List[str]
+    search: Optional[str] = None
+    tactic: Optional[str] = "all"
+    severity: Optional[str] = "all"
+    size: Optional[int] = 10
+    page: Optional[int] = 1
+
+
+# ===================================
+# Helper Functions for Unified Queries
+# ===================================
+
+def filter_valid_indices(indices: List[str]) -> List[str]:
+    """Filter out Windows/winlog indices from the list"""
+    valid_indices = []
+    for idx in indices:
+        idx_lower = idx.lower()
+        if "windows" not in idx_lower and "winlog" not in idx_lower:
+            valid_indices.append(idx)
+    return valid_indices
+
+
+async def validate_indices(indices: List[str]) -> Dict[str, bool]:
+    """Check which indices exist in Elasticsearch"""
+    valid_indices = {}
+    for idx in indices:
+        try:
+            exists = await es.indices.exists(index=idx)
+            valid_indices[idx] = exists
+        except Exception as e:
+            print(f"Error checking index {idx}: {e}")
+            valid_indices[idx] = False
+    return valid_indices
+
+
+# ===================================
+# Unified Endpoints (New)
+# ===================================
+
+@app.post("/api/unified/technique-stats", summary="Get technique statistics across multiple index patterns")
+async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
+    """
+    Unified endpoint that queries multiple index patterns simultaneously.
+    Combines results from Palo Alto XSIAM, CrowdStrike, and other supported sources.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "techniques": [
+            {"id": "T1059", "eventIds": []},
+            {"id": "T1068", "eventIds": []}
+        ],
+        "dateRange": {
+            "start": "2024-01-01T00:00:00Z",
+            "end": "2024-01-31T23:59:59Z"
+        }
+    }
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported in unified endpoints."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        # Determine date range
+        if request.dateRange:
+            start_date = request.dateRange.start
+            end_date = request.dateRange.end
+        else:
+            start_date = "now-7d"
+            end_date = "now"
+        
+        # Initialize aggregated results
+        unified_stats = {}
+        for tech in request.techniques:
+            unified_stats[tech.id] = {
+                "count": 0,
+                "severity": "none",
+                "lastSeen": None,
+                "sources": {}  # Track counts per index pattern
+            }
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                searches = []
+                
+                # Build multi-search for this index pattern
+                for tech in request.techniques:
+                    technique_ids = [tech.id] if isinstance(tech.id, str) and tech.id.upper().startswith("T") else []
+                    
+                    if not technique_ids:
+                        continue
+                    
+                    searches.append({"index": index_pattern})
+                    
+                    # Build query based on index type
+                    if "technique_id_field" in field_mapping:
+                        # CrowdStrike-style
+                        searches.append({
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {"terms": {field_mapping["technique_id_field"]: technique_ids}},
+                                        {"range": {
+                                            field_mapping["timestamp_field"]: {
+                                                "gte": start_date,
+                                                "lte": end_date
+                                            }
+                                        }}
+                                    ]
+                                }
+                            },
+                            "size": 0,
+                            "aggs": {
+                                "latest": {"max": {"field": field_mapping["timestamp_field"]}}
+                            }
+                        })
+                    else:
+                        # Palo Alto-style
+                        searches.append({
+                            "query": {
+                                "bool": {
+                                    "must": [
+                                        {
+                                            "bool": {
+                                                "should": [
+                                                    {"wildcard": {field_mapping["technique_field"]: f"{tid} - *"}}
+                                                    for tid in technique_ids
+                                                ]
+                                            }
+                                        },
+                                        {"range": {
+                                            field_mapping["timestamp_field"]: {
+                                                "gte": start_date,
+                                                "lte": end_date
+                                            }
+                                        }}
+                                    ]
+                                }
+                            },
+                            "size": 0,
+                            "aggs": {
+                                "latest": {"max": {"field": field_mapping["timestamp_field"]}}
+                            }
+                        })
+                
+                if not searches:
+                    continue
+                
+                # Execute multi-search for this index
+                response = await es.msearch(body=searches)
+                
+                # Process results
+                tech_index = 0
+                for tech in request.techniques:
+                    technique_ids = [tech.id] if isinstance(tech.id, str) and tech.id.upper().startswith("T") else []
+                    
+                    if not technique_ids:
+                        continue
+                    
+                    result = response['responses'][tech_index]
+                    tech_index += 1
+                    
+                    if result.get("error"):
+                        print(f"Error querying {index_pattern} for {tech.id}: {result['error']}")
+                        continue
+                    
+                    count = result.get("hits", {}).get("total", {}).get("value", 0)
+                    last_seen = result.get("aggregations", {}).get("latest", {}).get("value_as_string")
+                    
+                    # Aggregate counts
+                    unified_stats[tech.id]["count"] += count
+                    unified_stats[tech.id]["sources"][index_pattern] = count
+                    
+                    # Update lastSeen to most recent
+                    if last_seen:
+                        current_last = unified_stats[tech.id]["lastSeen"]
+                        if not current_last or last_seen > current_last:
+                            unified_stats[tech.id]["lastSeen"] = last_seen
+            
+            except ValueError as ve:
+                # Unsupported index pattern
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error processing index {index_pattern}: {e}")
+                continue
+        
+        # Calculate severity based on total counts
+        for tech_id, stats in unified_stats.items():
+            count = stats["count"]
+            if count > 100:
+                stats["severity"] = "critical"
+            elif count > 50:
+                stats["severity"] = "high"
+            elif count > 10:
+                stats["severity"] = "medium"
+            elif count > 0:
+                stats["severity"] = "low"
+            else:
+                stats["severity"] = "none"
+        
+        return unified_stats
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error in unified technique-stats: {str(e)}")
+
+
+@app.post("/api/unified/stats", summary="Get overall statistics across multiple index patterns")
+async def get_unified_statistics(request: UnifiedStatsRequest):
+    """
+    Unified statistics endpoint that aggregates data from multiple sources.
+    Returns combined counts by tactic and provides breakdown by source.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "search": "malware",
+        "tactic": "TA0002",
+        "dayRange": 7
+    }
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        # Initialize aggregated results
+        unified_stats = {
+            "total": 0,
+            "tactics": {},  # tactic_id -> {name, count, sources: {index: count}}
+            "sources": {},  # index -> total count
+            "breakdown": []  # List of per-index stats
+        }
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                query = {"bool": {"must": [], "filter": []}}
+                
+                # Date range filter
+                if request.dayRange:
+                    query["bool"]["filter"].append({
+                        "range": {
+                            field_mapping["timestamp_field"]: {
+                                "gte": f"now-{request.dayRange}d",
+                                "lte": "now"
+                            }
+                        }
+                    })
+                
+                # Search filter
+                if request.search:
+                    search_fields = ["message", "host.name", "user.name"]
+                    if "category_field" in field_mapping:
+                        search_fields.append(field_mapping["category_field"])
+                    
+                    query["bool"]["must"].append({
+                        "multi_match": {
+                            "query": request.search,
+                            "fields": search_fields,
+                            "fuzziness": "AUTO"
+                        }
+                    })
+                
+                # Tactic filter
+                if request.tactic and request.tactic != "all":
+                    if "tactic_id_field" in field_mapping:
+                        query["bool"]["filter"].append({
+                            "term": {field_mapping["tactic_id_field"]: request.tactic}
+                        })
+                    else:
+                        query["bool"]["filter"].append({
+                            "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
+                        })
+                
+                # Aggregations
+                aggs = {
+                    "tactic_counts": {
+                        "terms": {
+                            "field": field_mapping.get("tactic_id_field", field_mapping["tactic_field"]),
+                            "size": 50
+                        }
+                    }
+                }
+                
+                # Execute query
+                response = await es.search(
+                    index=index_pattern,
+                    body={
+                        "query": query if query["bool"]["must"] or query["bool"]["filter"] else {"match_all": {}},
+                        "size": 0,
+                        "aggs": aggs
+                    }
+                )
+                
+                # Process results
+                total_for_index = response["hits"]["total"]["value"]
+                unified_stats["total"] += total_for_index
+                unified_stats["sources"][index_pattern] = total_for_index
+                
+                # Process tactic counts
+                tactic_buckets = response["aggregations"].get("tactic_counts", {}).get("buckets", [])
+                
+                for bucket in tactic_buckets:
+                    tactic_value = bucket["key"]
+                    count = bucket["doc_count"]
+                    
+                    # Extract tactic ID
+                    if " - " in tactic_value:
+                        tactic_id = tactic_value.split(" - ")[0]
+                        tactic_name = tactic_value.split(" - ")[1] if len(tactic_value.split(" - ")) > 1 else tactic_id
+                    else:
+                        tactic_id = tactic_value
+                        tactic_name = get_tactic_name(tactic_id) or tactic_id
+                    
+                    # Aggregate tactic counts
+                    if tactic_id not in unified_stats["tactics"]:
+                        unified_stats["tactics"][tactic_id] = {
+                            "name": tactic_name,
+                            "count": 0,
+                            "sources": {}
+                        }
+                    
+                    unified_stats["tactics"][tactic_id]["count"] += count
+                    unified_stats["tactics"][tactic_id]["sources"][index_pattern] = count
+                
+                # Add breakdown per index
+                unified_stats["breakdown"].append({
+                    "index": index_pattern,
+                    "total": total_for_index,
+                    "tactics": len(tactic_buckets)
+                })
+            
+            except ValueError as ve:
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error processing index {index_pattern}: {e}")
+                continue
+        
+        # Format tactics as list
+        tactics_list = [
+            {
+                "id": tactic_id,
+                "name": data["name"],
+                "count": data["count"],
+                "sources": data["sources"]
+            }
+            for tactic_id, data in unified_stats["tactics"].items()
+        ]
+        
+        # Sort by count descending
+        tactics_list.sort(key=lambda x: x["count"], reverse=True)
+        
+        return {
+            "total": unified_stats["total"],
+            "tactics": tactics_list,
+            "sources": unified_stats["sources"],
+            "breakdown": unified_stats["breakdown"]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error in unified stats: {str(e)}")
+
+
+@app.post("/api/unified/search", summary="Search across multiple index patterns")
+async def search_unified(request: UnifiedSearchRequest):
+    """
+    Unified search endpoint that queries multiple index patterns and combines results.
+    Results are sorted by timestamp across all sources.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "search": "suspicious activity",
+        "tactic": "all",
+        "size": 20,
+        "page": 1
+    }
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        all_results = []
+        total_count = 0
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                query = {"bool": {"must": [], "filter": []}}
+                
+                # Search filter
+                if request.search:
+                    query["bool"]["must"].append({
+                        "multi_match": {
+                            "query": request.search,
+                            "fields": [
+                                "message",
+                                "host.name",
+                                "user.name",
+                                field_mapping["technique_field"],
+                                field_mapping["tactic_field"]
+                            ],
+                            "fuzziness": "AUTO"
+                        }
+                    })
+                
+                # Tactic filter
+                if request.tactic and request.tactic != "all":
+                    if "tactic_id_field" in field_mapping:
+                        query["bool"]["filter"].append({
+                            "term": {field_mapping["tactic_id_field"]: request.tactic}
+                        })
+                    else:
+                        query["bool"]["filter"].append({
+                            "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
+                        })
+                
+                # Get more results than needed for proper pagination after combining
+                response = await es.search(
+                    index=index_pattern,
+                    body={
+                        "query": query if query["bool"]["must"] or query["bool"]["filter"] else {"match_all": {}},
+                        "size": request.size * len(existing_indices),  # Get enough from each source
+                        "sort": [{field_mapping["timestamp_field"]: "desc"}]
+                    }
+                )
+                
+                total_count += response["hits"]["total"]["value"]
+                
+                # Format results for this index
+                for hit in response["hits"]["hits"]:
+                    source = hit["_source"]
+                    
+                    if "palo-xsiam" in index_pattern.lower():
+                        result = {
+                            "id": hit["_id"],
+                            "index": index_pattern,
+                            "timestamp": source.get("@timestamp"),
+                            "tactic": source.get("palo-xsiam", {}).get("mitre_tactic_id_and_name"),
+                            "technique": source.get("palo-xsiam", {}).get("mitre_technique_id_and_name"),
+                            "category": source.get("palo-xsiam", {}).get("category"),
+                            "host": source.get("host", {}).get("name"),
+                            "message": source.get("message")
+                        }
+                    else:  # CrowdStrike
+                        mitre_attack = source.get("crowdstrike", {}).get("event", {}).get("MitreAttack", {})
+                        result = {
+                            "id": hit["_id"],
+                            "index": index_pattern,
+                            "timestamp": source.get("@timestamp"),
+                            "tactic": mitre_attack.get("Tactic"),
+                            "tacticId": mitre_attack.get("TacticID"),
+                            "technique": mitre_attack.get("Technique"),
+                            "techniqueId": mitre_attack.get("TechniqueID"),
+                            "host": source.get("host", {}).get("name"),
+                            "message": source.get("message")
+                        }
+                    
+                    all_results.append(result)
+            
+            except ValueError as ve:
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error searching index {index_pattern}: {e}")
+                continue
+        
+        # Sort combined results by timestamp
+        all_results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        
+        # Apply pagination to combined results
+        from_index = (request.page - 1) * request.size
+        to_index = from_index + request.size
+        paginated_results = all_results[from_index:to_index]
+        
+        return {
+            "total": total_count,
+            "page": request.page,
+            "size": request.size,
+            "results": paginated_results,
+            "sources": list(existing_indices)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error in unified search: {str(e)}")
+
+# Add these models near the other Pydantic models section
+
+class TopTechniquesRequest(BaseModel):
+    """Request for top detected techniques"""
+    indices: List[str]
+    dayRange: Optional[int] = 7
+    limit: Optional[int] = 5
+    tactic: Optional[str] = "all"
+
+class TopTechniqueResult(BaseModel):
+    """Result for a single technique"""
+    technique_id: str
+    technique_name: str
+    count: int
+    tactic_ids: List[str]
+    tactic_names: List[str]
+    sources: Dict[str, int]  # index -> count
+
+# Add this endpoint with the other unified endpoints
+
+@app.post("/api/unified/top-techniques", summary="Get top N most detected techniques across indices")
+async def get_top_techniques(request: TopTechniquesRequest):
+    """
+    Get the top N most detected MITRE techniques across multiple index patterns.
+    Aggregates data from all specified indices and returns techniques ranked by detection count.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "dayRange": 7,
+        "limit": 5,
+        "tactic": "all"
+    }
+    
+    Returns:
+    {
+        "techniques": [
+            {
+                "technique_id": "T1059",
+                "technique_name": "Command and Scripting Interpreter",
+                "count": 1523,
+                "tactic_ids": ["TA0002"],
+                "tactic_names": ["Execution"],
+                "sources": {"palo-xsiam-*": 1200, "crowdstrike-*": 323}
+            },
+            ...
+        ],
+        "total_detections": 5420,
+        "time_range": {"start": "2024-10-20T00:00:00Z", "end": "2024-10-27T23:59:59Z"}
+    }
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        # Calculate time range
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=request.dayRange)
+        
+        # Dictionary to aggregate technique counts across all indices
+        technique_aggregation = {}
+        total_detections = 0
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                
+                # Build base query with time filter
+                query = {
+                    "bool": {
+                        "must": [],
+                        "filter": [
+                            {
+                                "range": {
+                                    field_mapping["timestamp_field"]: {
+                                        "gte": f"now-{request.dayRange}d",
+                                        "lte": "now"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+                
+                # Add tactic filter if specified
+                if request.tactic and request.tactic != "all":
+                    if "tactic_id_field" in field_mapping:
+                        query["bool"]["filter"].append({
+                            "term": {field_mapping["tactic_id_field"]: request.tactic}
+                        })
+                    else:
+                        query["bool"]["filter"].append({
+                            "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
+                        })
+                
+                # Determine aggregation field based on index type
+                if "technique_id_field" in field_mapping:
+                    # CrowdStrike: has separate technique ID field
+                    agg_field = field_mapping["technique_id_field"]
+                else:
+                    # Palo Alto: combined field
+                    agg_field = field_mapping["technique_field"]
+                
+                # Execute aggregation query
+                response = await es.search(
+                    index=index_pattern,
+                    body={
+                        "query": query,
+                        "size": 0,
+                        "aggs": {
+                            "top_techniques": {
+                                "terms": {
+                                    "field": agg_field,
+                                    "size": request.limit * 3,  # Get more than needed to handle parsing
+                                    "order": {"_count": "desc"}
+                                }
+                            }
+                        }
+                    }
+                )
+                
+                # Process aggregation results
+                buckets = response.get("aggregations", {}).get("top_techniques", {}).get("buckets", [])
+                
+                for bucket in buckets:
+                    technique_value = bucket["key"]
+                    count = bucket["doc_count"]
+                    total_detections += count
+                    
+                    # Parse technique ID from the value
+                    if " - " in technique_value:
+                        # Palo Alto format: "T1059 - Command and Scripting Interpreter"
+                        technique_id = technique_value.split(" - ")[0].strip()
+                    else:
+                        # CrowdStrike format: just the ID
+                        technique_id = technique_value.strip()
+                    
+                    # Skip if not a valid technique ID
+                    if not technique_id.upper().startswith("T"):
+                        continue
+                    
+                    # Aggregate counts across indices
+                    if technique_id not in technique_aggregation:
+                        technique_aggregation[technique_id] = {
+                            "count": 0,
+                            "sources": {}
+                        }
+                    
+                    technique_aggregation[technique_id]["count"] += count
+                    technique_aggregation[technique_id]["sources"][index_pattern] = count
+                
+            except ValueError as ve:
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error processing index {index_pattern}: {e}")
+                continue
+        
+        # Sort techniques by total count and get top N
+        sorted_techniques = sorted(
+            technique_aggregation.items(),
+            key=lambda x: x[1]["count"],
+            reverse=True
+        )[:request.limit]
+        
+        # Enrich with technique metadata from MITRE mapping
+        results = []
+        for technique_id, data in sorted_techniques:
+            # Get technique name and tactics from MITRE mapping
+            technique_name = get_technique_name(technique_id) or technique_id
+            tactic_ids = get_technique_tactics(technique_id)
+            tactic_names = [get_tactic_name(tid) or tid for tid in tactic_ids]
+            
+            results.append({
+                "technique_id": technique_id,
+                "technique_name": technique_name,
+                "count": data["count"],
+                "tactic_ids": tactic_ids,
+                "tactic_names": tactic_names,
+                "sources": data["sources"]
+            })
+        
+        return {
+            "techniques": results,
+            "total_detections": total_detections,
+            "time_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat()
+            },
+            "limit": request.limit,
+            "tactic_filter": request.tactic
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error fetching top techniques: {str(e)}")
+
+
+    
+# Add these models for kill chain mapping
+
+class KillChainRequest(BaseModel):
+    """Request for kill chain coverage analysis"""
+    indices: List[str]
+    dayRange: Optional[int] = 7
+    search: Optional[str] = None
+
+class TacticCoverage(BaseModel):
+    """Coverage data for a single tactic"""
+    tactic_id: str
+    tactic_name: str
+    techniques_detected: int
+    total_detections: int
+    top_techniques: List[Dict[str, Any]]
+    coverage_percentage: float
+    sources: Dict[str, int]
+
+class KillChainResponse(BaseModel):
+    """Complete kill chain coverage response"""
+    tactics: List[TacticCoverage]
+    total_detections: int
+    unique_techniques: int
+    time_range: Dict[str, str]
+    indices_queried: List[str]
+
+# Cyber Kill Chain Phase Definitions (7 phases)
+KILL_CHAIN_PHASES = {
+    "reconnaissance": {
+        "name": "Reconnaissance",
+        "name_th": "การสอดแนม",
+        "description": "Research, identification and selection of targets"
+    },
+    "weaponization": {
+        "name": "Weaponization", 
+        "name_th": "การสร้างอาวุธ",
+        "description": "Pairing remote access malware with exploit into a deliverable payload"
+    },
+    "delivery": {
+        "name": "Delivery",
+        "name_th": "การส่งมอบ",
+        "description": "Transmission of weapon to target environment"
+    },
+    "exploitation": {
+        "name": "Exploitation",
+        "name_th": "การโจมตี",
+        "description": "Trigger intruders' code to exploit vulnerability"
+    },
+    "installation": {
+        "name": "Installation",
+        "name_th": "การติดตั้ง",
+        "description": "Installation of malware on the asset"
+    },
+    "command_control": {
+        "name": "Command & Control",
+        "name_th": "การสั่งการและควบคุม",
+        "description": "Command channel for remote manipulation"
+    },
+    "actions_objectives": {
+        "name": "Actions on Objectives",
+        "name_th": "การดำเนินการตามเป้าหมาย",
+        "description": "Intruders accomplish their original goals"
+    }
+}
+
+# Mapping MITRE ATT&CK Tactics to Cyber Kill Chain Phases
+MITRE_TO_KILLCHAIN = {
+    # Reconnaissance phase
+    "TA0043": "reconnaissance",  # Reconnaissance
+    
+    # Weaponization phase (resource development)
+    "TA0042": "weaponization",  # Resource Development
+    
+    # Delivery phase
+    "TA0001": "delivery",  # Initial Access
+    
+    # Exploitation phase
+    "TA0002": "exploitation",  # Execution
+    "TA0004": "exploitation",  # Privilege Escalation
+    "TA0005": "exploitation",  # Defense Evasion
+    
+    # Installation phase
+    "TA0003": "installation",  # Persistence
+    
+    # Command & Control phase
+    "TA0011": "command_control",  # Command and Control
+    
+    # Actions on Objectives phase
+    "TA0006": "actions_objectives",  # Credential Access
+    "TA0007": "actions_objectives",  # Discovery
+    "TA0008": "actions_objectives",  # Lateral Movement
+    "TA0009": "actions_objectives",  # Collection
+    "TA0010": "actions_objectives",  # Exfiltration
+    "TA0040": "actions_objectives",  # Impact
+}
+
+# Add the kill chain mapping endpoint
+
+@app.post("/api/unified/kill-chain", summary="Get complete kill chain coverage across all tactics")
+async def get_kill_chain_coverage(request: KillChainRequest):
+    """
+    Comprehensive endpoint that maps all detections to the complete MITRE ATT&CK kill chain.
+    Returns coverage data for every tactic with technique-level details.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "dayRange": 7,
+        "search": null
+    }
+    
+    Returns complete kill chain with:
+    - Coverage for all 14 MITRE tactics (TA0001-TA0043)
+    - Techniques detected per tactic
+    - Total detections per tactic
+    - Top techniques for each tactic
+    - Source breakdown (which index contributed what)
+    - Coverage percentage based on available techniques
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        # Calculate time range
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=request.dayRange)
+        
+        # Initialize kill chain structure with all tactics
+        kill_chain = {}
+        for tactic_id, tactic_name in TACTIC_MAP.items():
+            kill_chain[tactic_id] = {
+                "tactic_id": tactic_id,
+                "tactic_name": tactic_name,
+                "techniques": {},  # technique_id -> {count, sources, name}
+                "total_detections": 0,
+                "sources": {}
+            }
+        
+        total_detections = 0
+        all_detected_techniques = set()
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                
+                # Build base query
+                query = {
+                    "bool": {
+                        "must": [],
+                        "filter": [
+                            {
+                                "range": {
+                                    field_mapping["timestamp_field"]: {
+                                        "gte": f"now-{request.dayRange}d",
+                                        "lte": "now"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+                
+                # Add search filter if provided
+                if request.search:
+                    search_fields = ["message", "host.name", "user.name"]
+                    if "category_field" in field_mapping:
+                        search_fields.append(field_mapping["category_field"])
+                    
+                    query["bool"]["must"].append({
+                        "multi_match": {
+                            "query": request.search,
+                            "fields": search_fields,
+                            "fuzziness": "AUTO"
+                        }
+                    })
+                
+                # Determine aggregation fields
+                if "technique_id_field" in field_mapping:
+                    # CrowdStrike: has separate fields
+                    technique_agg_field = field_mapping["technique_id_field"]
+                    tactic_agg_field = field_mapping["tactic_id_field"]
+                else:
+                    # Palo Alto: combined fields
+                    technique_agg_field = field_mapping["technique_field"]
+                    tactic_agg_field = field_mapping["tactic_field"]
+                
+                # Execute query with nested aggregations
+                # First aggregate by tactic, then by technique within each tactic
+                response = await es.search(
+                    index=index_pattern,
+                    body={
+                        "query": query,
+                        "size": 0,
+                        "aggs": {
+                            "tactics": {
+                                "terms": {
+                                    "field": tactic_agg_field,
+                                    "size": 50
+                                },
+                                "aggs": {
+                                    "techniques": {
+                                        "terms": {
+                                            "field": technique_agg_field,
+                                            "size": 100
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+                
+                # Process aggregation results
+                tactic_buckets = response.get("aggregations", {}).get("tactics", {}).get("buckets", [])
+                
+                for tactic_bucket in tactic_buckets:
+                    tactic_value = tactic_bucket["key"]
+                    
+                    # Parse tactic ID
+                    if " - " in tactic_value:
+                        # Palo Alto format: "TA0002 - Execution"
+                        tactic_id = tactic_value.split(" - ")[0].strip()
+                    else:
+                        # CrowdStrike format: need to map name to ID
+                        # Try to find matching tactic ID
+                        tactic_id = None
+                        for tid, tname in TACTIC_MAP.items():
+                            if tname.lower() == tactic_value.lower():
+                                tactic_id = tid
+                                break
+                        if not tactic_id:
+                            continue
+                    
+                    # Ensure tactic exists in our structure
+                    if tactic_id not in kill_chain:
+                        kill_chain[tactic_id] = {
+                            "tactic_id": tactic_id,
+                            "tactic_name": TACTIC_MAP.get(tactic_id, tactic_id),
+                            "techniques": {},
+                            "total_detections": 0,
+                            "sources": {}
+                        }
+                    
+                    # Process techniques within this tactic
+                    technique_buckets = tactic_bucket.get("techniques", {}).get("buckets", [])
+                    
+                    for technique_bucket in technique_buckets:
+                        technique_value = technique_bucket["key"]
+                        count = technique_bucket["doc_count"]
+                        
+                        # Parse technique ID
+                        if " - " in technique_value:
+                            technique_id = technique_value.split(" - ")[0].strip()
+                        else:
+                            technique_id = technique_value.strip()
+                        
+                        # Skip if not a valid technique ID
+                        if not technique_id.upper().startswith("T"):
+                            continue
+                        
+                        all_detected_techniques.add(technique_id)
+                        total_detections += count
+                        
+                        # Add to kill chain structure
+                        if technique_id not in kill_chain[tactic_id]["techniques"]:
+                            kill_chain[tactic_id]["techniques"][technique_id] = {
+                                "technique_id": technique_id,
+                                "technique_name": get_technique_name(technique_id) or technique_id,
+                                "count": 0,
+                                "sources": {}
+                            }
+                        
+                        kill_chain[tactic_id]["techniques"][technique_id]["count"] += count
+                        kill_chain[tactic_id]["techniques"][technique_id]["sources"][index_pattern] = \
+                            kill_chain[tactic_id]["techniques"][technique_id]["sources"].get(index_pattern, 0) + count
+                        
+                        kill_chain[tactic_id]["total_detections"] += count
+                        kill_chain[tactic_id]["sources"][index_pattern] = \
+                            kill_chain[tactic_id]["sources"].get(index_pattern, 0) + count
+                
+            except ValueError as ve:
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error processing index {index_pattern}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Format results for each tactic
+        tactics_coverage = []
+        
+        # Get all tactics in order (TA0043, TA0042, TA0001-TA0011, TA0040)
+        tactic_order = ["TA0043", "TA0042"] + [f"TA{str(i).zfill(4)}" for i in range(1, 12)] + ["TA0040"]
+        
+        for tactic_id in tactic_order:
+            if tactic_id not in TACTIC_MAP:
+                continue
+                
+            tactic_data = kill_chain.get(tactic_id, {
+                "tactic_id": tactic_id,
+                "tactic_name": TACTIC_MAP[tactic_id],
+                "techniques": {},
+                "total_detections": 0,
+                "sources": {}
+            })
+            
+            # Get top 5 techniques for this tactic
+            sorted_techniques = sorted(
+                tactic_data["techniques"].values(),
+                key=lambda x: x["count"],
+                reverse=True
+            )[:5]
+            
+            # Calculate coverage percentage
+            # Count total available techniques for this tactic in MITRE mapping
+            available_techniques = sum(
+                1 for tech_data in TECHNIQUE_MAP.values()
+                if tactic_id in tech_data.get("tactics", [])
+            )
+            
+            coverage_percentage = 0.0
+            if available_techniques > 0:
+                detected_count = len(tactic_data["techniques"])
+                coverage_percentage = (detected_count / available_techniques) * 100
+            
+            tactics_coverage.append({
+                "tactic_id": tactic_id,
+                "tactic_name": tactic_data["tactic_name"],
+                "techniques_detected": len(tactic_data["techniques"]),
+                "total_detections": tactic_data["total_detections"],
+                "top_techniques": sorted_techniques,
+                "coverage_percentage": round(coverage_percentage, 2),
+                "sources": tactic_data["sources"],
+                "available_techniques": available_techniques
+            })
+        
+        return {
+            "tactics": tactics_coverage,
+            "total_detections": total_detections,
+            "unique_techniques": len(all_detected_techniques),
+            "time_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat()
+            },
+            "indices_queried": existing_indices,
+            "total_tactics": len([t for t in tactics_coverage if t["total_detections"] > 0])
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error mapping kill chain: {str(e)}")
+
+@app.post("/api/unified/cyber-kill-chain", summary="Get Cyber Kill Chain coverage (7 phases)")
+async def get_cyber_kill_chain_coverage(request: KillChainRequest):
+    """
+    Comprehensive endpoint that maps all detections to the Cyber Kill Chain methodology (7 phases).
+    Converts MITRE ATT&CK tactics to their corresponding kill chain phases.
+    
+    Example request:
+    {
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
+        "dayRange": 7,
+        "search": null
+    }
+    
+    Returns Cyber Kill Chain with 7 phases:
+    1. Reconnaissance (การสอดแนม)
+    2. Weaponization (การสร้างอาวุธ)
+    3. Delivery (การส่งมอบ)
+    4. Exploitation (การโจมตี)
+    5. Installation (การติดตั้ง)
+    6. Command & Control (การสั่งการและควบคุม)
+    7. Actions on Objectives (การดำเนินการตามเป้าหมาย)
+    
+    Each phase includes:
+    - Techniques detected in this phase
+    - Total detections per phase
+    - Top techniques for each phase
+    - Source breakdown (which index contributed what)
+    - Coverage percentage based on MITRE techniques in that phase
+    """
+    try:
+        # Filter out Windows indices
+        valid_indices = filter_valid_indices(request.indices)
+        
+        if not valid_indices:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid indices provided. Windows/winlog indices are not supported."
+            )
+        
+        # Validate indices exist
+        indices_status = await validate_indices(valid_indices)
+        existing_indices = [idx for idx, exists in indices_status.items() if exists]
+        
+        if not existing_indices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"None of the provided indices exist: {valid_indices}"
+            )
+        
+        # Calculate time range
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=request.dayRange)
+        
+        # Initialize kill chain structure with all 7 phases
+        kill_chain = {}
+        for phase_id, phase_data in KILL_CHAIN_PHASES.items():
+            kill_chain[phase_id] = {
+                "phase_id": phase_id,
+                "phase_name": phase_data["name"],
+                "phase_name_th": phase_data["name_th"],
+                "techniques": {},  # technique_id -> {count, sources, name, tactic}
+                "total_detections": 0,
+                "sources": {},
+                "tactics": set()  # Track which MITRE tactics contributed
+            }
+        
+        total_detections = 0
+        all_detected_techniques = set()
+        
+        # Query each index pattern
+        for index_pattern in existing_indices:
+            try:
+                field_mapping = get_field_mapping(index_pattern)
+                
+                # Build base query
+                query = {
+                    "bool": {
+                        "must": [],
+                        "filter": [
+                            {
+                                "range": {
+                                    field_mapping["timestamp_field"]: {
+                                        "gte": f"now-{request.dayRange}d",
+                                        "lte": "now"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+                
+                # Add search filter if provided
+                if request.search:
+                    search_fields = ["message", "host.name", "user.name"]
+                    if "category_field" in field_mapping:
+                        search_fields.append(field_mapping["category_field"])
+                    
+                    query["bool"]["must"].append({
+                        "multi_match": {
+                            "query": request.search,
+                            "fields": search_fields,
+                            "fuzziness": "AUTO"
+                        }
+                    })
+                
+                # Determine aggregation fields
+                if "technique_id_field" in field_mapping:
+                    technique_agg_field = field_mapping["technique_id_field"]
+                    tactic_agg_field = field_mapping["tactic_id_field"]
+                else:
+                    technique_agg_field = field_mapping["technique_field"]
+                    tactic_agg_field = field_mapping["tactic_field"]
+                
+                # Execute query with nested aggregations
+                response = await es.search(
+                    index=index_pattern,
+                    body={
+                        "query": query,
+                        "size": 0,
+                        "aggs": {
+                            "tactics": {
+                                "terms": {
+                                    "field": tactic_agg_field,
+                                    "size": 50
+                                },
+                                "aggs": {
+                                    "techniques": {
+                                        "terms": {
+                                            "field": technique_agg_field,
+                                            "size": 100
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+                
+                # Process aggregation results
+                tactic_buckets = response.get("aggregations", {}).get("tactics", {}).get("buckets", [])
+                
+                for tactic_bucket in tactic_buckets:
+                    tactic_value = tactic_bucket["key"]
+                    
+                    # Parse tactic ID from different formats
+                    if " - " in tactic_value:
+                        # Palo Alto format: "TA0002 - Execution"
+                        tactic_id = tactic_value.split(" - ")[0].strip()
+                    else:
+                        # CrowdStrike format: map name to ID
+                        tactic_id = None
+                        for tid, tname in TACTIC_MAP.items():
+                            if tname.lower() == tactic_value.lower():
+                                tactic_id = tid
+                                break
+                        if not tactic_id:
+                            continue
+                    
+                    # Map MITRE tactic to Cyber Kill Chain phase
+                    phase_id = MITRE_TO_KILLCHAIN.get(tactic_id)
+                    if not phase_id:
+                        continue
+                    
+                    kill_chain[phase_id]["tactics"].add(tactic_id)
+                    
+                    # Process techniques within this tactic
+                    technique_buckets = tactic_bucket.get("techniques", {}).get("buckets", [])
+                    
+                    for technique_bucket in technique_buckets:
+                        technique_value = technique_bucket["key"]
+                        count = technique_bucket["doc_count"]
+                        
+                        # Parse technique ID
+                        if " - " in technique_value:
+                            technique_id = technique_value.split(" - ")[0].strip()
+                        else:
+                            technique_id = technique_value.strip()
+                        
+                        # Skip if not a valid technique ID
+                        if not technique_id.upper().startswith("T"):
+                            continue
+                        
+                        all_detected_techniques.add(technique_id)
+                        total_detections += count
+                        
+                        # Add to kill chain structure
+                        if technique_id not in kill_chain[phase_id]["techniques"]:
+                            kill_chain[phase_id]["techniques"][technique_id] = {
+                                "technique_id": technique_id,
+                                "technique_name": get_technique_name(technique_id) or technique_id,
+                                "count": 0,
+                                "sources": {},
+                                "tactic_id": tactic_id,
+                                "tactic_name": TACTIC_MAP.get(tactic_id, tactic_id)
+                            }
+                        
+                        kill_chain[phase_id]["techniques"][technique_id]["count"] += count
+                        kill_chain[phase_id]["techniques"][technique_id]["sources"][index_pattern] = \
+                            kill_chain[phase_id]["techniques"][technique_id]["sources"].get(index_pattern, 0) + count
+                        
+                        kill_chain[phase_id]["total_detections"] += count
+                        kill_chain[phase_id]["sources"][index_pattern] = \
+                            kill_chain[phase_id]["sources"].get(index_pattern, 0) + count
+                
+            except ValueError as ve:
+                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
+                continue
+            except Exception as e:
+                print(f"Error processing index {index_pattern}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Format results for each phase (in kill chain order)
+        phases_coverage = []
+        phase_order = [
+            "reconnaissance",
+            "weaponization", 
+            "delivery",
+            "exploitation",
+            "installation",
+            "command_control",
+            "actions_objectives"
+        ]
+        
+        for phase_id in phase_order:
+            phase_data = kill_chain[phase_id]
+            
+            # Get top 5 techniques for this phase
+            sorted_techniques = sorted(
+                phase_data["techniques"].values(),
+                key=lambda x: x["count"],
+                reverse=True
+            )[:5]
+            
+            # Calculate coverage percentage
+            # Count total available techniques that map to this phase
+            available_techniques = 0
+            for tech_id, tech_data in TECHNIQUE_MAP.items():
+                # Check if any of this technique's tactics map to this phase
+                for tactic_id in tech_data.get("tactics", []):
+                    if MITRE_TO_KILLCHAIN.get(tactic_id) == phase_id:
+                        available_techniques += 1
+                        break
+            
+            coverage_percentage = 0.0
+            if available_techniques > 0:
+                detected_count = len(phase_data["techniques"])
+                coverage_percentage = (detected_count / available_techniques) * 100
+            
+            phases_coverage.append({
+                "phase_id": phase_id,
+                "phase_name": phase_data["phase_name"],
+                "phase_name_th": phase_data["phase_name_th"],
+                "techniques_detected": len(phase_data["techniques"]),
+                "total_detections": phase_data["total_detections"],
+                "top_techniques": sorted_techniques,
+                "coverage_percentage": round(coverage_percentage, 2),
+                "sources": phase_data["sources"],
+                "available_techniques": available_techniques,
+                "mitre_tactics": list(phase_data["tactics"])
+            })
+        
+        return {
+            "phases": phases_coverage,
+            "total_detections": total_detections,
+            "unique_techniques": len(all_detected_techniques),
+            "time_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat()
+            },
+            "indices_queried": existing_indices,
+            "active_phases": len([p for p in phases_coverage if p["total_detections"] > 0]),
+            "methodology": "Cyber Kill Chain (Lockheed Martin)"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error mapping Cyber Kill Chain: {str(e)}")
+
+
 @app.get("/", summary="Health Check")
 async def root():
     """Check if API is running"""
@@ -977,7 +2428,18 @@ async def root():
         "message": "MITRE ATT&CK Multi-Index API",
         "endpoints": {
             "legacy": ["/api/technique-stats-date", "/api/stats-date"],
-            "multi-index": ["/api/multi-index/technique-stats", "/api/multi-index/stats", "/api/multi-index/search"]
+            "multi-index": [
+                "/api/multi-index/technique-stats",
+                "/api/multi-index/stats",
+                "/api/multi-index/search"
+            ],
+            "unified": [
+                "/api/unified/technique-stats",
+                "/api/unified/stats",
+                "/api/unified/search",
+                "/api/unified/top-techniques",
+                "/api/unified/kill-chain"
+            ]
         }
     }
     

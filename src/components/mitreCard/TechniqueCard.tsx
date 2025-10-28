@@ -66,9 +66,18 @@ const TechniqueCard: React.FC<TechniqueCardProps> = ({
 
   return (
     <div className="relative" ref={dropdownRef}>
-      <button
+      {/* Changed from <button> to <div> with role="button" */}
+      <div
         onClick={onClick}
-        className={`w-full p-2 rounded text-left transition-all hover:scale-105 ${
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        className={`w-full p-2 rounded text-left transition-all hover:scale-105 cursor-pointer ${
           getSeverityColor(displaySeverity)
         } ${isSelected ? 'ring-2 ring-white shadow-lg' : ''}`}
         title={`${technique.id}: ${technique.name}\nEvents: ${totalCount}${hasSubTechniques ? `\n${subTechniques.length} sub-techniques` : ''}`}
@@ -104,7 +113,7 @@ const TechniqueCard: React.FC<TechniqueCardProps> = ({
             </div>
           )}
         </div>
-      </button>
+      </div>
 
       {/* Dropdown Menu */}
       {showDropdown && hasSubTechniques && (
