@@ -17,10 +17,8 @@ import {
   type UnifiedTechniqueStats,
   type UnifiedStats,
 } from "../../services/multiMitreService";
-import { fetchAllTechniqueStatsWithDateRange, fetchStats } from "../../services/mitreService";
 import SummaryView from "../../components/mitreCard/SummaryView";
 import KillChainDashboard from "../../components/mitreCard/KillChainDashboard";
-import KillChainCircular from "../../components/mitreCard/killchainCircular";
 
 type ViewMode = "matrix" | "summary" | "kill chain";
 
@@ -53,7 +51,26 @@ const MitreAttackNavigator: React.FC = () => {
 
   // ✨ NEW: State for dropdown visibility
   const [showDropdown, setShowDropdown] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("matrix");
+  // Helper function to validate the stored view mode
+  const getInitialViewMode = (): ViewMode => {
+    const savedViewMode = localStorage.getItem("mitreViewMode");
+    if (
+      savedViewMode === "matrix" ||
+      savedViewMode === "summary" ||
+      savedViewMode === "kill chain"
+    ) {
+      return savedViewMode;
+    }
+    // Default to 'matrix' if nothing is stored or the value is invalid
+    return "matrix";
+  };
+
+  const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode());
+
+  // ✨ NEW: Add a useEffect to save the viewMode to localStorage on change
+  useEffect(() => {
+    localStorage.setItem("mitreViewMode", viewMode);
+  }, [viewMode]);
 
   const datePresets = [
     { label: "Last 24h", hours: 24 },
@@ -485,11 +502,6 @@ const MitreAttackNavigator: React.FC = () => {
             </button>
           </div>
 
-          {viewMode === "matrix" && (
-            <> </>
-          )}
-
-
           {/* Data Sources Breakdown */}
           <div className="bg-gray-900 rounded p-3 mb-4">
             <div className="text-gray-400 text-xs mb-2 font-semibold">
@@ -514,97 +526,106 @@ const MitreAttackNavigator: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">
-                Total Events ({getDaysInRange()} Days)
+          {(viewMode === "matrix" || viewMode === "summary") && (
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">
+                  Total Events ({getDaysInRange()} Days)
+                </div>
+                <div className="text-2xl font-bold text-white">
+                  {stats.total.toLocaleString()}
+                </div>
               </div>
-              <div className="text-2xl font-bold text-white">
-                {stats.total.toLocaleString()}
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">Active Sources</div>
+                <div className="text-2xl font-bold text-white">
+                  {selectedIndices.length}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">
+                  Techniques Detected
+                </div>
+                <div className="text-2xl font-bold text-white">
+                  {detectedCount} / {techniques.length}
+                </div>
               </div>
             </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">Active Sources</div>
-              <div className="text-2xl font-bold text-white">
-                {selectedIndices.length}
-              </div>
-            </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">
-                Techniques Detected
-              </div>
-              <div className="text-2xl font-bold text-white">
-                {detectedCount} / {techniques.length}
-              </div>
-            </div>
-          </div>
+          )}
 
-          <div className="grid grid-cols-4 gap-3 mb-4">
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">
-                Critical Severity
+          {viewMode === "matrix" && (
+            <div className="grid grid-cols-4 gap-3 mb-4">
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">
+                  Critical Severity
+                </div>
+                <div className="text-2xl font-bold text-white">
+                  {severityCounts.critical.toLocaleString()}
+                </div>
               </div>
-              <div className="text-2xl font-bold text-white">
-                {severityCounts.critical.toLocaleString()}
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">High Severity</div>
+                <div className="text-2xl font-bold text-white">
+                  {severityCounts.high.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">Medium Severity</div>
+                <div className="text-2xl font-bold text-white">
+                  {severityCounts.medium.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">Low Severity</div>
+                <div className="text-2xl font-bold text-white">
+                  {severityCounts.low.toLocaleString()}
+                </div>
               </div>
             </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">High Severity</div>
-              <div className="text-2xl font-bold text-white">
-                {severityCounts.high.toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">Medium Severity</div>
-              <div className="text-2xl font-bold text-white">
-                {severityCounts.medium.toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-gray-900 rounded p-3">
-              <div className="text-gray-400 text-xs mb-1">Low Severity</div>
-              <div className="text-2xl font-bold text-white">
-                {severityCounts.low.toLocaleString()}
-              </div>
-            </div>
-          </div>
+          )}
 
-          <div className="flex gap-2">
-            <div className="flex-1 relative">
-              <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search techniques..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-red-500"
-              />
-            </div>
-            <select
-              value={severityFilter}
-              onChange={(e) => setSeverityFilter(e.target.value)}
-              className="px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:ring-1 focus:ring-red-500"
-            >
-              <option value="all">All</option>
-              <option value="detected">Detected</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
-            </select>
-          </div>
-
-          <div className="mt-3 flex items-center gap-4 text-xs">
-            <span className="text-gray-400">Severity:</span>
-            {["critical", "high", "medium", "low", "none"].map((sev) => (
-              <div key={sev} className="flex items-center gap-1.5">
-                <div
-                  className={`w-3 h-3 rounded ${getSeverityColor(sev)}`}
-                ></div>
-                <span className="text-gray-300 capitalize">{sev}</span>
+          {viewMode === "matrix" && (
+            <div className="flex gap-2">
+              <div className="flex-1 relative">
+                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search techniques..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                />
               </div>
-            ))}
-          </div>
+              <select
+                value={severityFilter}
+                onChange={(e) => setSeverityFilter(e.target.value)}
+                className="px-3 py-1.5 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:outline-none focus:ring-1 focus:ring-red-500"
+              >
+                <option value="all">All</option>
+                <option value="detected">Detected</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+          )}
+
+          {viewMode === "matrix" && (
+            <div className="mt-3 flex items-center gap-4 text-xs">
+              <span className="text-gray-400">Severity:</span>
+              {["critical", "high", "medium", "low", "none"].map((sev) => (
+                <div key={sev} className="flex items-center gap-1.5">
+                  <div
+                    className={`w-3 h-3 rounded ${getSeverityColor(sev)}`}
+                  ></div>
+                  <span className="text-gray-300 capitalize">{sev}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
+
         {viewMode === "matrix" && (
           <div className="bg-gray-800 rounded-lg shadow-xl p-3 overflow-x-auto">
             <div className="min-w-[1600px]">
@@ -705,9 +726,9 @@ const MitreAttackNavigator: React.FC = () => {
               selectedIndices={selectedIndices}
               dayRange={getDaysInRange()}
             />
-            
+
           </div>
-         
+
         )}
       </div>
 

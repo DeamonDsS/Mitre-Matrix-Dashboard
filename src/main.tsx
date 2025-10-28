@@ -12,8 +12,8 @@ const router = createBrowserRouter([
     path: "/",
     element: <App />, // Root layout or main application component
     children: [
-      { index: true, element: <Dashboard /> },
-      { path: "/mitre-navigator", element: <MitreAttackNavigator /> },
+      { index: true, element: <MitreAttackNavigator /> },
+      { path: "/old-dashboard", element: <Dashboard /> },
     ],
       
   },
