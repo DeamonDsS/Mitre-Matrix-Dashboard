@@ -173,8 +173,8 @@ const SummaryView: React.FC<SummaryViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-400 text-sm mb-1">Total Events</p>
@@ -187,7 +187,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
             </div>
           </div>
           <p className="text-xs text-gray-500 mt-2">Last {dayRange} days</p>
-        </div>
+        </div> */}
 
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">
@@ -204,7 +204,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
           <p className="text-xs text-gray-500 mt-2">Unique MITRE tactics</p>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        {/* <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-400 text-sm mb-1">Data Sources</p>
@@ -217,7 +217,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
             </div>
           </div>
           <p className="text-xs text-gray-500 mt-2">Active indices</p>
-        </div>
+        </div> */}
 
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">

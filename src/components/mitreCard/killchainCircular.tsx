@@ -37,7 +37,7 @@ interface KillChainDashboardProps {
   onDayRangeChange?: (days: number) => void;
 }
 
-const KillChainDashboard: React.FC<KillChainDashboardProps> = ({ 
+const KillChainCircular: React.FC<KillChainDashboardProps> = ({ 
   selectedIndices, 
   dayRange,
   onDayRangeChange 
@@ -601,4 +601,4 @@ const KillChainDashboard: React.FC<KillChainDashboardProps> = ({
   );
 };
 
-export default KillChainDashboard;
+export default KillChainCircular;
