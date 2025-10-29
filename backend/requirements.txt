@@ -1,4 +1,17 @@
 # requirements.txt
+# 
+# Setup Instructions:
+# 1. Open VS Code Command Palette: Ctrl + Shift + P
+# 2. Type: "Python: Select Interpreter"
+# 3. Select: .\backend\venv\Scripts\python.exe
+#
+# Installation (run from backend folder):
+# python -m venv venv
+# venv\Scripts\activate
+# pip install -r requirements.txt
+#
+# Note: Requires Python 3.12 or lower (3.14 not supported yet)
+
 flask
 flask-cors
 elasticsearch==8.15.0
@@ -7,6 +20,4 @@ fastapi==0.115.0
 uvicorn==0.30.0
 python-dotenv==1.0.0
 pydantic==2.9.0
-#rtart-events-beat
-# Ctrl + Shift + P to select path
-
+aiohttp
