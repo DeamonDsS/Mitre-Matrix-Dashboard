@@ -1,13 +1,22 @@
-echo off
-echo Activating virtual environment...
-call naviagator-backend\venv\Scripts\activate.bat
+@echo off
+title MITRE Matrix Dashboard - Service Launcher
 
-echo Starting Multi Pattern service...
+echo ================================================
+echo   MITRE Matrix Dashboard - Starting Services
+echo ================================================
+echo.
 
-start cmd /k "cd /d naviagator-backend\ && venv\Scripts\activate && python multi_pattern.py"
+echo [1/2] Starting Backend (Multi Pattern Service)...
+start "Backend Service" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && python multi_pattern.py"
 
-echo Starting frontend (React)...
-start cmd /k "npm run dev"
+timeout /t 2 /nobreak >nul
 
-echo All services started in separate terminals.
+echo [2/2] Starting Frontend (React + Vite)...
+start "Frontend Service" cmd /k "cd /d "%~dp0frontend" && npm run dev"
+
+echo.
+echo ================================================
+echo   All services started successfully!
+echo   Check the new terminal windows.
+echo ================================================
 pause

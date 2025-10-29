@@ -1,0 +1,12 @@
+# requirements.txt
+flask
+flask-cors
+elasticsearch==8.15.0
+requests
+fastapi==0.115.0
+uvicorn==0.30.0
+python-dotenv==1.0.0
+pydantic==2.9.0
+#rtart-events-beat
+# Ctrl + Shift + P to select path
+
