@@ -154,7 +154,7 @@ def get_technique_severity(event_ids: List[int]) -> str:
 # Dynamic MITRE Mapping Loader (from enterprise-attack.json)
 # Keep the original path as requested
 # ===================================
-MAPPING_PATH = Path(__file__).parent / "../public/data/enterprise-attack.json"
+MAPPING_PATH = Path(__file__).parent / "../frontend/public/data/enterprise-attack.json"
 MITRE_MAPPING = {}
 TACTIC_MAP: Dict[str, str] = {}       # TA0001 -> "Initial Access"
 TECHNIQUE_MAP: Dict[str, Dict] = {}   # T1059 -> {"name": "...", "tactics": ["TA0002"], "is_subtechnique": False}
