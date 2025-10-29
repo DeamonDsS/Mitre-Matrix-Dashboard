@@ -7,7 +7,7 @@ echo ================================================
 echo.
 
 echo [1/2] Starting Backend (Multi Pattern Service)...
-start "Backend Service" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && python multi_pattern.py"
+start "Backend Service" cmd /k "cd /d "%~dp0backend" && venv\Scripts\activate && python main.py"
 
 timeout /t 2 /nobreak >nul
 

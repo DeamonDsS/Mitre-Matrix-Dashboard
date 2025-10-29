@@ -254,6 +254,24 @@ pip list
 
 # Freeze current dependencies
 pip freeze > requirements.txt
+
+## Environment Setup
+
+1. Copy the example environment file:
+```bash
+   cp .env.example .env
+```
+
+2. Edit `.env` and configure:
+   - `ES_URL`: Your Elasticsearch URL
+   - `ES_USER`: Elasticsearch username (if auth enabled)
+   - `ES_PASS`: Elasticsearch password (if auth enabled)
+
+3. Required variables:
+   - `ES_URL` - Elasticsearch connection
+   - `API_PORT` - Backend API port (default: 8000)
+
+4. Optional variables: See `.env.example` for all options
 ```
 
 ## 🤝 Contributing

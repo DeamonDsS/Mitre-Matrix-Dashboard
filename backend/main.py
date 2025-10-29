@@ -1,4 +1,4 @@
-# multi_pattern.py
+# main.py
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
@@ -13,6 +13,10 @@ import json
 from pathlib import Path
 
 load_dotenv()
+
+API_PORT = int(os.getenv("API_PORT", 8000))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+DEFAULT_DAY_RANGE = int(os.getenv("DEFAULT_DAY_RANGE", 7))
 
 es = None  # Global variable
 
