@@ -57,8 +57,8 @@ export async function fetchStatsWithPayload(baseUrl: string, data: MitreStatsReq
 export const fetchTactics = async (): Promise<MitreTactic[]> => {
   try {
     // ดึงจาก enterprise-attack.json
-    // const response = await fetch('/data/enterprise-attack.json');
-    const response = await fetch('/naviagator-backend/cti/enterprise-attack/enterprise-attack.json');
+    const response = await fetch('/data/enterprise-attack.json');
+    // const response = await fetch('/backend/cti/enterprise-attack/enterprise-attack.json');
     const data = await response.json();
     
     // Filter เฉพาะ x-mitre-tactic objects

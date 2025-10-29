@@ -128,7 +128,7 @@ class MitreStatsRequest(BaseModel):
     techniques: List[Technique]
     dateRange: Optional[DateRange] = None  # Add this
 
-MAPPING_PATH = Path(__file__).parent / "../public/data/enterprise-attack.json"
+MAPPING_PATH = Path(__file__).parent / "../frontend/public/data/enterprise-attack.json"
 with open(MAPPING_PATH, "r", encoding="utf-8") as f:
     MITRE_MAPPING = json.load(f)
 
