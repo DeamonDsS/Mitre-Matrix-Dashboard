@@ -1,3 +1,17 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Root font & dark background */
+html {
+  @apply font-sans;
+}
+
+body {
+  @apply bg-gray-900 text-gray-100 min-h-screen;
+}
+
+/* Optional: smooth transitions for colors and shadows */
+* {
+  @apply transition-colors transition-shadow duration-200;
+}

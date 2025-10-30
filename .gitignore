@@ -64,6 +64,8 @@ docker/volumes/
 Thumbs.db
 .DS_Store
 
+#ML
+ml/data/
 # Misc
 cti
 *.bak

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Shield, Search, RefreshCw, Calendar, Layers, Grid3x3, BarChart3, TrendingUp } from "lucide-react";
+import { Shield, Search, RefreshCw, Calendar, Layers, Grid3x3, BarChart3, TrendingUp, PieChart } from "lucide-react";
 import TechniqueCard from "../../components/mitreCard/TechniqueCard";
 import TechniqueModal from "../../components/mitreCard/TechniqueModal";
 import type {
@@ -18,9 +18,11 @@ import {
   type UnifiedStats,
 } from "../../services/multiMitreService";
 import SummaryView from "../../components/mitreCard/SummaryView";
-import KillChainDashboard from "../../components/mitreCard/KillChainDashboard";
+import Coveragedashboard from "../../components/mitreCard/Coveragedashboard";
+import CoveragedashboardMl from "../../components/mitreCard/CoverageDashboardMl";
+import CategoryDashboard from "../../components/CategoryDashboard/CategoryDashboard";
 
-type ViewMode = "matrix" | "summary" | "kill chain";
+type ViewMode = "matrix" | "summary" | "kill chain" | "categories";
 
 const MitreAttackNavigator: React.FC = () => {
   const [selectedTechnique, setSelectedTechnique] =
@@ -57,7 +59,8 @@ const MitreAttackNavigator: React.FC = () => {
     if (
       savedViewMode === "matrix" ||
       savedViewMode === "summary" ||
-      savedViewMode === "kill chain"
+      savedViewMode === "kill chain" ||
+      savedViewMode === "categories"
     ) {
       return savedViewMode;
     }
@@ -83,15 +86,16 @@ const MitreAttackNavigator: React.FC = () => {
   const [selectedIndices, setSelectedIndices] = useState<string[]>([
     "palo-xsiam-*",
     "crowdstrike-*",
+    "suricata-*",
   ]);
 
   const availableIndices = [
     { value: "palo-xsiam-*", label: "Palo Alto XSIAM" },
     { value: "crowdstrike-*", label: "CrowdStrike" },
-    { value: ".ds-winlogbeat-9.1.5-*", label: "WinlogBeat" },
-    { value: "custom-logs-*", label: "Custom Logs" },
-  ];
+    { value: "suricata-*", label: "Suricata" },
+    { value: "winlogbeat-*", label: "WinlogBeat" },
 
+  ];
 
   // Helper function to check if a technique is a parent (no dot in ID)
   const isParentTechnique = (techniqueId: string): boolean => {
@@ -112,9 +116,15 @@ const MitreAttackNavigator: React.FC = () => {
   // ✨ NEW: Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      const dropdown = document.getElementById("source-dropdown");
-      if (dropdown && !dropdown.contains(event.target as Node)) {
+      const sourceDropdown = document.getElementById("source-dropdown");
+      const dateDropdown = document.getElementById("date-dropdown")
+
+      if (sourceDropdown && !sourceDropdown.contains(event.target as Node)) {
         setShowDropdown(false);
+      }
+
+      if (dateDropdown && !dateDropdown.contains(event.target as Node)) {
+        setShowDatePicker(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -383,7 +393,7 @@ const MitreAttackNavigator: React.FC = () => {
                 )}
               </div>
 
-              <div className="relative">
+              <div className="relative" id="date-dropdown">
                 <button
                   onClick={() => setShowDatePicker(!showDatePicker)}
                   className="px-3 py-1.5 bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors flex items-center gap-2 text-sm"
@@ -499,6 +509,17 @@ const MitreAttackNavigator: React.FC = () => {
             >
               <TrendingUp className="w-4 h-4" />
               Kill Chain Statistics
+            </button>
+
+            <button
+              onClick={() => setViewMode("categories")}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${viewMode === "categories"
+                ? "text-white border-b-2 border-red-500"
+                : "text-gray-400 hover:text-white"
+                }`}
+            >
+              <PieChart className="w-4 h-4" />
+              Category Analytics
             </button>
           </div>
 
@@ -722,13 +743,24 @@ const MitreAttackNavigator: React.FC = () => {
 
         {viewMode === "kill chain" && (
           <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <KillChainDashboard
+            {/* <Coveragedashboard
+              selectedIndices={selectedIndices}
+              dayRange={getDaysInRange()}
+            /> */}
+            <CoveragedashboardMl
               selectedIndices={selectedIndices}
               dayRange={getDaysInRange()}
             />
-
           </div>
+        )}
 
+        {viewMode === "categories" && (
+          <div className="bg-gray-800 rounded-lg shadow-xl p-6">
+            <CategoryDashboard
+              selectedIndices={selectedIndices}
+              dayRange={getDaysInRange()}
+            />
+          </div>
         )}
       </div>
 
