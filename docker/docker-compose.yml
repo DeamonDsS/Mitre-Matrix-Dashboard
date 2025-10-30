@@ -134,7 +134,7 @@ services:
   # FastAPI Backend (Optional - เพิ่มถ้าต้องการ)
   backend:
     build:
-      context: ./naviagator-backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: security-backend
     environment:

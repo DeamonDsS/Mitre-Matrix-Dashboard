@@ -309,7 +309,7 @@ def get_tactic_name(tid: str) -> Optional[str]:
     return TACTIC_MAP.get(tid)
 
 
-# Suricata to the INDEX_FIELD_MAPPINGS dictionary
+# Add Suricata to the INDEX_FIELD_MAPPINGS dictionary
 INDEX_FIELD_MAPPINGS = {
     "palo-xsiam": {
         "tactic_field": "palo-xsiam.mitre_tactic_id_and_name.keyword",
@@ -343,73 +343,26 @@ INDEX_FIELD_MAPPINGS = {
 }
 
 # Updated get_field_mapping function
-# def get_field_mapping(index_pattern: str) -> Dict:
-#     """Determine field mapping based on index pattern"""
-#     index_lower = index_pattern.lower()
-    
-#     if "palo-xsiam" in index_lower or "palo" in index_lower:
-#         return INDEX_FIELD_MAPPINGS["palo-xsiam"]
-#     elif "crowdstrike" in index_lower:
-#         return INDEX_FIELD_MAPPINGS["crowdstrike"]
-#     elif "suricata" in index_lower:
-#         return INDEX_FIELD_MAPPINGS["suricata"]
-#     elif "windows" in index_lower or "winlog" in index_lower:
-#         raise ValueError(
-#             f"Windows index pattern detected: {index_pattern}. "
-#             "Please use legacy endpoints (/api/technique-stats-date, /api/stats-date) for Windows event logs."
-#         )
-#     else:
-#         raise ValueError(
-#             f"Unsupported index pattern: {index_pattern}. "
-#             "Supported patterns: palo-xsiam, crowdstrike, suricata"
-#         )
-
-def get_field_mapping(index_pattern: str) -> dict:
-    """
-    Returns field mappings for different index patterns.
-    Raises ValueError if index pattern is not supported.
-    """
+def get_field_mapping(index_pattern: str) -> Dict:
+    """Determine field mapping based on index pattern"""
     index_lower = index_pattern.lower()
     
-    # Palo Alto XSIAM
-    if "palo-xsiam" in index_lower:
-        return {
-            "timestamp_field": "@timestamp",
-            "technique_field": "palo-xsiam.mitre_technique_id_and_name",
-            "tactic_field": "palo-xsiam.mitre_tactic_id_and_name",
-            "category_field": "palo-xsiam.category",
-            "severity_field": "palo-xsiam.severity",
-        }
-    
-    # CrowdStrike
+    if "palo-xsiam" in index_lower or "palo" in index_lower:
+        return INDEX_FIELD_MAPPINGS["palo-xsiam"]
     elif "crowdstrike" in index_lower:
-        return {
-            "timestamp_field": "@timestamp",
-            "technique_id_field": "crowdstrike.event.MitreAttack.TechniqueID",
-            "technique_name_field": "crowdstrike.event.MitreAttack.Technique",
-            "tactic_id_field": "crowdstrike.event.MitreAttack.TacticID",
-            "tactic_name_field": "crowdstrike.event.MitreAttack.Tactic",
-            "severity_field": "crowdstrike.event.Severity",
-        }
-    
-    # Suricata
+        return INDEX_FIELD_MAPPINGS["crowdstrike"]
     elif "suricata" in index_lower:
-        return {
-            "timestamp_field": "timestamp",
-            # Suricata uses metadata fields for MITRE ATT&CK (if available in rules)
-            "technique_id_field": "suricata.eve.alert.metadata.mitre_technique_id",
-            "technique_name_field": "suricata.eve.alert.metadata.mitre_technique_name",
-            "tactic_id_field": "suricata.eve.alert.metadata.mitre_tactic_id", 
-            "tactic_name_field": "suricata.eve.alert.metadata.mitre_tactic_name",
-            # Primary Suricata fields
-            "signature_field": "suricata.eve.alert.signature",
-            "classification_field": "suricata.eve.alert.category",
-            "severity_field": "suricata.eve.alert.severity",
-            "signature_id_field": "suricata.eve.alert.signature_id",
-        }
-    
+        return INDEX_FIELD_MAPPINGS["suricata"]
+    elif "windows" in index_lower or "winlog" in index_lower:
+        raise ValueError(
+            f"Windows index pattern detected: {index_pattern}. "
+            "Please use legacy endpoints (/api/technique-stats-date, /api/stats-date) for Windows event logs."
+        )
     else:
-        raise ValueError(f"Unsupported index pattern: {index_pattern}")
+        raise ValueError(
+            f"Unsupported index pattern: {index_pattern}. "
+            "Supported patterns: palo-xsiam, crowdstrike, suricata"
+        )
 
 
 # Helper function to get MITRE data from Suricata classification
@@ -1234,62 +1187,6 @@ async def search_multi_index(
         raise HTTPException(status_code=500, detail=f"Error in multi-index search: {str(e)}")
     
 
-
-# Classification to severity mapping for Suricata
-def map_suricata_classification_to_severity(classification: str) -> str:
-    """Map Suricata classification keywords to severity levels"""
-    if not classification:
-        return "low"
-    
-    classification_lower = classification.lower()
-    
-    # Critical severity classifications
-    critical_patterns = [
-        "trojan",
-        "malware command and control",
-        "successful administrator privilege gain",
-        "executable code was detected",
-        "large scale information leak",
-        "information leak"
-    ]
-    
-    # High severity classifications
-    high_patterns = [
-        "exploit",
-        "attempted administrator privilege gain",
-        "attempted user privilege gain",
-        "web application attack",
-        "network scan",
-        "denial of service",
-        "crypto currency mining"
-    ]
-    
-    # Medium severity classifications
-    medium_patterns = [
-        "misc attack",
-        "attempted information leak",
-        "command and control",
-        "potentially bad traffic",
-        "possibly unwanted program",
-        "social engineering"
-    ]
-    
-    # Check patterns
-    for pattern in critical_patterns:
-        if pattern in classification_lower:
-            return "critical"
-    
-    for pattern in high_patterns:
-        if pattern in classification_lower:
-            return "high"
-    
-    for pattern in medium_patterns:
-        if pattern in classification_lower:
-            return "medium"
-    
-    return "low"
-    
-
 # ===================================
 # New Pydantic Models for Unified Endpoints
 # ===================================
@@ -1346,20 +1243,18 @@ async def validate_indices(indices: List[str]) -> Dict[str, bool]:
 
 
 # ===================================
-# Updated Unified Endpoints with Suricata Support
+# Unified Endpoints (New)
 # ===================================
 
 @app.post("/api/unified/technique-stats", summary="Get technique statistics across multiple index patterns")
 async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
     """
     Unified endpoint that queries multiple index patterns simultaneously.
-    Combines results from Palo Alto XSIAM, CrowdStrike, Suricata, and other supported sources.
-    
-    Note: Suricata technique stats require rules with MITRE ATT&CK metadata tags.
+    Combines results from Palo Alto XSIAM, CrowdStrike, and other supported sources.
     
     Example request:
     {
-        "indices": ["palo-xsiam-*", "crowdstrike-*", "suricata-*"],
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
         "techniques": [
             {"id": "T1059", "eventIds": []},
             {"id": "T1068", "eventIds": []}
@@ -1413,7 +1308,6 @@ async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
             try:
                 field_mapping = get_field_mapping(index_pattern)
                 searches = []
-                technique_query_map = []  # Track which techniques we're querying
                 
                 # Build multi-search for this index pattern
                 for tech in request.techniques:
@@ -1422,20 +1316,12 @@ async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
                     if not technique_ids:
                         continue
                     
-                    # Check if this index type supports technique queries
-                    has_technique_field = "technique_field" in field_mapping or "technique_id_field" in field_mapping
-                    
-                    if not has_technique_field:
-                        # Skip this technique for this index pattern
-                        continue
+                    searches.append({"index": index_pattern})
                     
                     # Build query based on index type
-                    query_body = None
-                    
                     if "technique_id_field" in field_mapping:
-                        # CrowdStrike or Suricata style (separate ID field)
-                        # Note: For Suricata, this only works if rules have MITRE metadata
-                        query_body = {
+                        # CrowdStrike-style
+                        searches.append({
                             "query": {
                                 "bool": {
                                     "must": [
@@ -1453,10 +1339,10 @@ async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
                             "aggs": {
                                 "latest": {"max": {"field": field_mapping["timestamp_field"]}}
                             }
-                        }
-                    elif "technique_field" in field_mapping:
-                        # Palo Alto style (combined ID and name field)
-                        query_body = {
+                        })
+                    else:
+                        # Palo Alto-style
+                        searches.append({
                             "query": {
                                 "bool": {
                                     "must": [
@@ -1481,55 +1367,48 @@ async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
                             "aggs": {
                                 "latest": {"max": {"field": field_mapping["timestamp_field"]}}
                             }
-                        }
-                    
-                    if query_body:
-                        # Add header and body as a pair
-                        searches.append({"index": index_pattern})
-                        searches.append(query_body)
-                        technique_query_map.append(tech.id)
+                        })
                 
                 if not searches:
-                    # No valid technique queries for this index
                     continue
                 
                 # Execute multi-search for this index
                 response = await es.msearch(body=searches)
                 
-                # Process results using the technique_query_map
-                for idx, tech_id in enumerate(technique_query_map):
-                    result = response['responses'][idx]
+                # Process results
+                tech_index = 0
+                for tech in request.techniques:
+                    technique_ids = [tech.id] if isinstance(tech.id, str) and tech.id.upper().startswith("T") else []
+                    
+                    if not technique_ids:
+                        continue
+                    
+                    result = response['responses'][tech_index]
+                    tech_index += 1
                     
                     if result.get("error"):
-                        print(f"Error querying {index_pattern} for {tech_id}: {result['error']}")
+                        print(f"Error querying {index_pattern} for {tech.id}: {result['error']}")
                         continue
                     
                     count = result.get("hits", {}).get("total", {}).get("value", 0)
                     last_seen = result.get("aggregations", {}).get("latest", {}).get("value_as_string")
                     
                     # Aggregate counts
-                    unified_stats[tech_id]["count"] += count
-                    unified_stats[tech_id]["sources"][index_pattern] = count
+                    unified_stats[tech.id]["count"] += count
+                    unified_stats[tech.id]["sources"][index_pattern] = count
                     
                     # Update lastSeen to most recent
                     if last_seen:
-                        current_last = unified_stats[tech_id]["lastSeen"]
+                        current_last = unified_stats[tech.id]["lastSeen"]
                         if not current_last or last_seen > current_last:
-                            unified_stats[tech_id]["lastSeen"] = last_seen
+                            unified_stats[tech.id]["lastSeen"] = last_seen
             
             except ValueError as ve:
                 # Unsupported index pattern
                 print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
                 continue
-            except KeyError as ke:
-                print(f"Missing key in technique-stats response from {index_pattern}: {ke}")
-                import traceback
-                traceback.print_exc()
-                continue
             except Exception as e:
                 print(f"Error processing index {index_pattern}: {e}")
-                import traceback
-                traceback.print_exc()
                 continue
         
         # Calculate severity based on total counts
@@ -1562,12 +1441,9 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
     Unified statistics endpoint that aggregates data from multiple sources.
     Returns combined counts by tactic and provides breakdown by source.
     
-    For Suricata: Groups by classification categories since MITRE tactic mapping 
-    may not be available in all rules.
-    
     Example request:
     {
-        "indices": ["palo-xsiam-*", "crowdstrike-*", "suricata-*"],
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
         "search": "malware",
         "tactic": "TA0002",
         "dayRange": 7
@@ -1596,7 +1472,7 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
         # Initialize aggregated results
         unified_stats = {
             "total": 0,
-            "tactics": {},  # tactic_id/category -> {name, count, sources: {index: count}}
+            "tactics": {},  # tactic_id -> {name, count, sources: {index: count}}
             "sources": {},  # index -> total count
             "breakdown": []  # List of per-index stats
         }
@@ -1621,20 +1497,8 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
                 # Search filter
                 if request.search:
                     search_fields = ["message", "host.name", "user.name"]
-                    
-                    # Add index-specific fields
-                    if "signature_field" in field_mapping:
-                        search_fields.append(field_mapping["signature_field"])
-                    if "classification_field" in field_mapping:
-                        search_fields.append(field_mapping["classification_field"])
-                    if "technique_field" in field_mapping:
-                        search_fields.append(field_mapping["technique_field"])
-                    if "tactic_field" in field_mapping:
-                        search_fields.append(field_mapping["tactic_field"])
-                    if "technique_name_field" in field_mapping:
-                        search_fields.append(field_mapping["technique_name_field"])
-                    if "tactic_name_field" in field_mapping:
-                        search_fields.append(field_mapping["tactic_name_field"])
+                    if "category_field" in field_mapping:
+                        search_fields.append(field_mapping["category_field"])
                     
                     query["bool"]["must"].append({
                         "multi_match": {
@@ -1644,9 +1508,8 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
                         }
                     })
                 
-                # Tactic filter (skip for Suricata if using classification instead)
-                is_suricata = "suricata" in index_pattern.lower()
-                if request.tactic and request.tactic != "all" and not is_suricata:
+                # Tactic filter
+                if request.tactic and request.tactic != "all":
                     if "tactic_id_field" in field_mapping:
                         query["bool"]["filter"].append({
                             "term": {field_mapping["tactic_id_field"]: request.tactic}
@@ -1656,19 +1519,12 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
                             "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
                         })
                 
-                # Determine aggregation field
-                # For Suricata, use classification instead of tactic if available
-                if is_suricata and "classification_field" in field_mapping:
-                    agg_field = field_mapping["classification_field"]
-                else:
-                    agg_field = field_mapping.get("tactic_id_field") or field_mapping.get("tactic_field")
-                
                 # Aggregations
                 aggs = {
-                    "category_counts": {
+                    "tactic_counts": {
                         "terms": {
-                            "field": agg_field,
-                            "size": 100  # Increase size for Suricata's many classifications
+                            "field": field_mapping.get("tactic_id_field", field_mapping["tactic_field"]),
+                            "size": 50
                         }
                     }
                 }
@@ -1683,78 +1539,60 @@ async def get_unified_statistics(request: UnifiedStatsRequest):
                     }
                 )
                 
-                # Check if response has valid structure
-                if not response or "hits" not in response:
-                    print(f"Invalid response structure from {index_pattern}")
-                    continue
-                
                 # Process results
-                total_for_index = response.get("hits", {}).get("total", {}).get("value", 0)
+                total_for_index = response["hits"]["total"]["value"]
                 unified_stats["total"] += total_for_index
                 unified_stats["sources"][index_pattern] = total_for_index
                 
-                # Process category/tactic counts
-                category_buckets = response.get("aggregations", {}).get("category_counts", {}).get("buckets", [])
+                # Process tactic counts
+                tactic_buckets = response["aggregations"].get("tactic_counts", {}).get("buckets", [])
                 
-                for bucket in category_buckets:
-                    category_value = bucket["key"]
+                for bucket in tactic_buckets:
+                    tactic_value = bucket["key"]
                     count = bucket["doc_count"]
                     
-                    # Extract category ID and name
-                    if is_suricata:
-                        # Suricata uses classification keywords as categories
-                        category_id = category_value
-                        category_name = category_value
-                    elif " - " in category_value:
-                        # Palo Alto style: "TA0002 - Execution"
-                        category_id = category_value.split(" - ")[0]
-                        category_name = category_value.split(" - ")[1] if len(category_value.split(" - ")) > 1 else category_id
+                    # Extract tactic ID
+                    if " - " in tactic_value:
+                        tactic_id = tactic_value.split(" - ")[0]
+                        tactic_name = tactic_value.split(" - ")[1] if len(tactic_value.split(" - ")) > 1 else tactic_id
                     else:
-                        # CrowdStrike style: "TA0002" or tactic name
-                        category_id = category_value
-                        category_name = get_tactic_name(category_id) or category_id
+                        tactic_id = tactic_value
+                        tactic_name = get_tactic_name(tactic_id) or tactic_id
                     
-                    # Aggregate counts
-                    if category_id not in unified_stats["tactics"]:
-                        unified_stats["tactics"][category_id] = {
-                            "name": category_name,
+                    # Aggregate tactic counts
+                    if tactic_id not in unified_stats["tactics"]:
+                        unified_stats["tactics"][tactic_id] = {
+                            "name": tactic_name,
                             "count": 0,
                             "sources": {}
                         }
                     
-                    unified_stats["tactics"][category_id]["count"] += count
-                    unified_stats["tactics"][category_id]["sources"][index_pattern] = count
+                    unified_stats["tactics"][tactic_id]["count"] += count
+                    unified_stats["tactics"][tactic_id]["sources"][index_pattern] = count
                 
                 # Add breakdown per index
                 unified_stats["breakdown"].append({
                     "index": index_pattern,
                     "total": total_for_index,
-                    "categories": len(category_buckets)
+                    "tactics": len(tactic_buckets)
                 })
             
             except ValueError as ve:
                 print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
                 continue
-            except KeyError as ke:
-                print(f"Missing key in response from {index_pattern}: {ke}")
-                import traceback
-                traceback.print_exc()
-                continue
             except Exception as e:
                 print(f"Error processing index {index_pattern}: {e}")
-                import traceback
-                traceback.print_exc()
                 continue
         
-        # Format tactics/categories as list
+        # Format tactics as list
         tactics_list = [
             {
-                "id": category_id,
+                "id": tactic_id,
                 "name": data["name"],
                 "count": data["count"],
                 "sources": data["sources"]
             }
-            for category_id, data in unified_stats["tactics"].items()
+            for tactic_id, data in unified_stats["tactics"].items()
         ]
         
         # Sort by count descending
@@ -1780,11 +1618,10 @@ async def search_unified(request: UnifiedSearchRequest):
     """
     Unified search endpoint that queries multiple index patterns and combines results.
     Results are sorted by timestamp across all sources.
-    Supports Palo Alto XSIAM, CrowdStrike, and Suricata indices.
     
     Example request:
     {
-        "indices": ["palo-xsiam-*", "crowdstrike-*", "suricata-*"],
+        "indices": ["palo-xsiam-*", "crowdstrike-*"],
         "search": "suspicious activity",
         "tactic": "all",
         "size": 20,
@@ -1819,47 +1656,26 @@ async def search_unified(request: UnifiedSearchRequest):
             try:
                 field_mapping = get_field_mapping(index_pattern)
                 query = {"bool": {"must": [], "filter": []}}
-                is_suricata = "suricata" in index_pattern.lower()
-                
-                # Build search fields list
-                search_fields = [
-                    "message",
-                    "host.name",
-                    "user.name"
-                ]
-                
-                # Add index-specific fields safely
-                if field_mapping.get("technique_field"):
-                    search_fields.append(field_mapping["technique_field"])
-                if field_mapping.get("tactic_field"):
-                    search_fields.append(field_mapping["tactic_field"])
-                if field_mapping.get("signature_field"):
-                    search_fields.append(field_mapping["signature_field"])
-                if field_mapping.get("classification_field"):
-                    search_fields.append(field_mapping["classification_field"])
-                if field_mapping.get("technique_name_field"):
-                    search_fields.append(field_mapping["technique_name_field"])
-                if field_mapping.get("tactic_name_field"):
-                    search_fields.append(field_mapping["tactic_name_field"])
                 
                 # Search filter
                 if request.search:
                     query["bool"]["must"].append({
                         "multi_match": {
                             "query": request.search,
-                            "fields": search_fields,
+                            "fields": [
+                                "message",
+                                "host.name",
+                                "user.name",
+                                field_mapping["technique_field"],
+                                field_mapping["tactic_field"]
+                            ],
                             "fuzziness": "AUTO"
                         }
                     })
                 
-                # Tactic/Category filter (for Suricata, treat as classification filter)
+                # Tactic filter
                 if request.tactic and request.tactic != "all":
-                    if is_suricata and "classification_field" in field_mapping:
-                        # For Suricata, filter by classification if tactic looks like a classification
-                        query["bool"]["filter"].append({
-                            "match": {field_mapping["classification_field"]: request.tactic}
-                        })
-                    elif "tactic_id_field" in field_mapping:
+                    if "tactic_id_field" in field_mapping:
                         query["bool"]["filter"].append({
                             "term": {field_mapping["tactic_id_field"]: request.tactic}
                         })
@@ -1867,12 +1683,6 @@ async def search_unified(request: UnifiedSearchRequest):
                         query["bool"]["filter"].append({
                             "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
                         })
-                
-                # Severity filter if provided
-                if request.severity and request.severity != "all" and "severity_field" in field_mapping:
-                    query["bool"]["filter"].append({
-                        "term": {field_mapping["severity_field"]: request.severity}
-                    })
                 
                 # Get more results than needed for proper pagination after combining
                 response = await es.search(
@@ -1894,7 +1704,6 @@ async def search_unified(request: UnifiedSearchRequest):
                         result = {
                             "id": hit["_id"],
                             "index": index_pattern,
-                            "source_type": "palo-xsiam",
                             "timestamp": source.get("@timestamp"),
                             "tactic": source.get("palo-xsiam", {}).get("mitre_tactic_id_and_name"),
                             "technique": source.get("palo-xsiam", {}).get("mitre_technique_id_and_name"),
@@ -1902,59 +1711,16 @@ async def search_unified(request: UnifiedSearchRequest):
                             "host": source.get("host", {}).get("name"),
                             "message": source.get("message")
                         }
-                    elif "crowdstrike" in index_pattern.lower():
+                    else:  # CrowdStrike
                         mitre_attack = source.get("crowdstrike", {}).get("event", {}).get("MitreAttack", {})
                         result = {
                             "id": hit["_id"],
                             "index": index_pattern,
-                            "source_type": "crowdstrike",
                             "timestamp": source.get("@timestamp"),
                             "tactic": mitre_attack.get("Tactic"),
                             "tacticId": mitre_attack.get("TacticID"),
                             "technique": mitre_attack.get("Technique"),
                             "techniqueId": mitre_attack.get("TechniqueID"),
-                            "host": source.get("host", {}).get("name"),
-                            "message": source.get("message")
-                        }
-                    elif "suricata" in index_pattern.lower():
-                        eve_data = source.get("suricata", {}).get("eve", {})
-                        alert = eve_data.get("alert", {})
-                        metadata = alert.get("metadata", {})
-                        
-                        classification = alert.get("category", "")
-                        severity_mapped = map_suricata_classification_to_severity(classification)
-                        
-                        result = {
-                            "id": hit["_id"],
-                            "index": index_pattern,
-                            "source_type": "suricata",
-                            "timestamp": source.get("timestamp") or source.get("@timestamp"),
-                            "signature": alert.get("signature"),
-                            "signatureId": alert.get("signature_id"),
-                            "category": classification,
-                            "severity": alert.get("severity", 1),
-                            "severityMapped": severity_mapped,
-                            # MITRE ATT&CK (if available)
-                            "tactic": metadata.get("mitre_tactic_name"),
-                            "tacticId": metadata.get("mitre_tactic_id"),
-                            "technique": metadata.get("mitre_technique_name"),
-                            "techniqueId": metadata.get("mitre_technique_id"),
-                            # Network details
-                            "srcIp": eve_data.get("src_ip") or source.get("source", {}).get("ip"),
-                            "destIp": eve_data.get("dest_ip") or source.get("destination", {}).get("ip"),
-                            "srcPort": eve_data.get("src_port") or source.get("source", {}).get("port"),
-                            "destPort": eve_data.get("dest_port") or source.get("destination", {}).get("port"),
-                            "proto": eve_data.get("proto"),
-                            "host": source.get("host", {}).get("name"),
-                            "message": source.get("message") or alert.get("signature")
-                        }
-                    else:
-                        # Generic format for unknown indices
-                        result = {
-                            "id": hit["_id"],
-                            "index": index_pattern,
-                            "source_type": "unknown",
-                            "timestamp": source.get(field_mapping.get("timestamp_field", "timestamp")),
                             "host": source.get("host", {}).get("name"),
                             "message": source.get("message")
                         }
@@ -1966,8 +1732,6 @@ async def search_unified(request: UnifiedSearchRequest):
                 continue
             except Exception as e:
                 print(f"Error searching index {index_pattern}: {e}")
-                import traceback
-                traceback.print_exc()
                 continue
         
         # Sort combined results by timestamp
@@ -2871,716 +2635,6 @@ async def get_cyber_kill_chain_coverage(request: KillChainRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error mapping Cyber Kill Chain: {str(e)}")
     
-
-# ===================================
-# Helper Functions
-# ===================================
-
-def get_category_fields(field_mapping: Dict) -> List[str]:
-    """
-    Get all category-related fields from field mapping.
-    Returns list of field names to aggregate.
-    """
-    category_fields = []
-    
-    # Palo Alto XSIAM
-    if field_mapping.get("alert_categories_field"):
-        category_fields.append(field_mapping["alert_categories_field"])
-    if field_mapping.get("category_field"):
-        category_fields.append(field_mapping["category_field"])
-    
-    # CrowdStrike
-    if field_mapping.get("objective_field"):
-        category_fields.append(field_mapping["objective_field"])
-    if field_mapping.get("event_name_field"):
-        category_fields.append(field_mapping["event_name_field"])
-    
-    # Suricata
-    if field_mapping.get("classification_field"):
-        category_fields.append(field_mapping["classification_field"])
-    
-    return category_fields
-    
-
-# ===================================
-# Pydantic Models for Category Endpoints
-# ===================================
-
-class CategoryStatsRequest(BaseModel):
-    """Request for category statistics across indices"""
-    indices: List[str]
-    dayRange: Optional[int] = 7
-    search: Optional[str] = None
-    tactic: Optional[str] = "all"
-    limit: Optional[int] = 10  # Top N categories
-
-class CategoryBreakdownRequest(BaseModel):
-    """Request for detailed category breakdown"""
-    indices: List[str]
-    category: str  # Specific category to analyze
-    dayRange: Optional[int] = 7
-    groupBy: Optional[str] = "technique"  # technique, tactic, host
-
-class CrossIndexCategoryRequest(BaseModel):
-    """Request for cross-index category comparison"""
-    indices: List[str]
-    dayRange: Optional[int] = 7
-    categories: Optional[List[str]] = None  # Filter specific categories
-    
-
-def get_host_field(field_mapping: Dict) -> str:
-    """Get the appropriate host field with keyword suffix if needed"""
-    # Try to determine the correct host field
-    host_field = "host.name"
-    
-    # For keyword fields, some indices need .keyword suffix
-    # This is a safe default that works with most ECS-compliant indices
-    return f"{host_field}.keyword"
-
-
-# ===================================
-# Endpoint 1: Unified Category Statistics
-# ===================================
-
-@app.post("/api/unified/category-stats", summary="Get category statistics across all indices")
-async def get_unified_category_stats(request: CategoryStatsRequest):
-    """
-    Get aggregated category statistics from multiple index patterns.
-    Combines data from:
-    - Palo Alto: alert_categories + category
-    - CrowdStrike: objectives + event names
-    - Suricata: classifications
-    
-    Example request:
-    {
-        "indices": ["palo-xsiam-*", "crowdstrike-*", "suricata-*"],
-        "dayRange": 7,
-        "limit": 10
-    }
-    
-    Returns:
-    {
-        "categories": [
-            {
-                "name": "Malware",
-                "count": 1523,
-                "sources": {"palo-xsiam-*": 890, "suricata-*": 633},
-                "percentage": 24.5,
-                "severity": "high",
-                "field_types": [...]
-            }
-        ],
-        "total_events": 6210,
-        "breakdown_by_source": {...}
-    }
-    """
-    try:
-        # Filter out Windows indices
-        valid_indices = filter_valid_indices(request.indices)
-        
-        if not valid_indices:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid indices provided."
-            )
-        
-        # Validate indices exist
-        indices_status = await validate_indices(valid_indices)
-        existing_indices = [idx for idx, exists in indices_status.items() if exists]
-        
-        if not existing_indices:
-            raise HTTPException(
-                status_code=404,
-                detail=f"None of the provided indices exist: {valid_indices}"
-            )
-        
-        # Aggregate categories across all indices
-        category_aggregation = {}  # category_name -> {count, sources, techniques}
-        total_events = 0
-        source_breakdown = {}
-        
-        # Query each index pattern
-        for index_pattern in existing_indices:
-            try:
-                field_mapping = get_field_mapping(index_pattern)
-                category_fields = get_category_fields(field_mapping)
-                
-                if not category_fields:
-                    print(f"No category fields found for {index_pattern}")
-                    continue
-                
-                # Build base query
-                query = {
-                    "bool": {
-                        "must": [],
-                        "filter": [
-                            {
-                                "range": {
-                                    field_mapping["timestamp_field"]: {
-                                        "gte": f"now-{request.dayRange}d",
-                                        "lte": "now"
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-                
-                # Add search filter
-                if request.search:
-                    search_fields = ["message", "host.name", "user.name"] + category_fields
-                    query["bool"]["must"].append({
-                        "multi_match": {
-                            "query": request.search,
-                            "fields": search_fields,
-                            "fuzziness": "AUTO"
-                        }
-                    })
-                
-                # Add tactic filter
-                if request.tactic and request.tactic != "all":
-                    if field_mapping.get("tactic_id_field"):
-                        query["bool"]["filter"].append({
-                            "term": {field_mapping["tactic_id_field"]: request.tactic}
-                        })
-                    elif field_mapping.get("tactic_field"):
-                        query["bool"]["filter"].append({
-                            "wildcard": {field_mapping["tactic_field"]: f"{request.tactic} - *"}
-                        })
-                
-                # Build aggregations for all category fields
-                aggs = {}
-                for idx, field in enumerate(category_fields):
-                    aggs[f"categories_{idx}"] = {
-                        "terms": {
-                            "field": field,
-                            "size": request.limit * 2,
-                            "order": {"_count": "desc"}
-                        }
-                    }
-                
-                # Execute query
-                response = await es.search(
-                    index=index_pattern,
-                    body={
-                        "query": query,
-                        "size": 0,
-                        "aggs": aggs
-                    }
-                )
-                
-                # Check response validity
-                if not response or "hits" not in response:
-                    print(f"Invalid response from {index_pattern}")
-                    continue
-                
-                # Process results
-                index_total = response.get("hits", {}).get("total", {}).get("value", 0)
-                total_events += index_total
-                source_breakdown[index_pattern] = index_total
-                
-                # Process each category field aggregation
-                for agg_name, agg_result in response.get("aggregations", {}).items():
-                    for bucket in agg_result.get("buckets", []):
-                        category_name = bucket["key"]
-                        count = bucket["doc_count"]
-                        
-                        if category_name not in category_aggregation:
-                            category_aggregation[category_name] = {
-                                "name": category_name,
-                                "count": 0,
-                                "sources": {},
-                                "field_types": set()  # Track which field types this came from
-                            }
-                        
-                        category_aggregation[category_name]["count"] += count
-                        category_aggregation[category_name]["sources"][index_pattern] = \
-                            category_aggregation[category_name]["sources"].get(index_pattern, 0) + count
-                        
-                        # Determine field type
-                        field_idx = int(agg_name.split("_")[1])
-                        field_name = category_fields[field_idx]
-                        
-                        if "alert_categories" in field_name:
-                            category_aggregation[category_name]["field_types"].add("alert_category")
-                        elif "objective" in field_name.lower():
-                            category_aggregation[category_name]["field_types"].add("objective")
-                        elif "event" in field_name.lower() and "name" in field_name.lower():
-                            category_aggregation[category_name]["field_types"].add("event_name")
-                        elif "classification" in field_name.lower():
-                            category_aggregation[category_name]["field_types"].add("classification")
-                        else:
-                            category_aggregation[category_name]["field_types"].add("category")
-                
-            except ValueError as ve:
-                print(f"Skipping unsupported index pattern {index_pattern}: {ve}")
-                continue
-            except KeyError as ke:
-                print(f"Missing key in response from {index_pattern}: {ke}")
-                import traceback
-                traceback.print_exc()
-                continue
-            except Exception as e:
-                print(f"Error processing index {index_pattern}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-        
-        # Sort and format results
-        sorted_categories = sorted(
-            category_aggregation.values(),
-            key=lambda x: x["count"],
-            reverse=True
-        )[:request.limit]
-        
-        # Calculate percentages and determine severity
-        results = []
-        for cat in sorted_categories:
-            percentage = (cat["count"] / total_events * 100) if total_events > 0 else 0
-            
-            # Determine severity based on count and percentage
-            if percentage >= 20 or cat["count"] >= 1000:
-                severity = "critical"
-            elif percentage >= 10 or cat["count"] >= 500:
-                severity = "high"
-            elif percentage >= 5 or cat["count"] >= 100:
-                severity = "medium"
-            else:
-                severity = "low"
-            
-            # Convert set to list for JSON serialization
-            field_types = list(cat["field_types"])
-            
-            results.append({
-                "name": cat["name"],
-                "count": cat["count"],
-                "sources": cat["sources"],
-                "percentage": round(percentage, 2),
-                "severity": severity,
-                "field_types": field_types
-            })
-        
-        return {
-            "categories": results,
-            "total_events": total_events,
-            "breakdown_by_source": source_breakdown,
-            "time_range": {
-                "start": f"now-{request.dayRange}d",
-                "end": "now"
-            },
-            "indices_queried": existing_indices
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error in category stats: {str(e)}")
-
-
-# ===================================
-# Endpoint 2: Category Breakdown with Techniques
-# ===================================
-
-@app.post("/api/unified/category-breakdown", summary="Get detailed breakdown for a specific category")
-async def get_category_breakdown(request: CategoryBreakdownRequest):
-    """
-    Get detailed breakdown for a specific category showing:
-    - Associated MITRE techniques
-    - Tactics involved
-    - Top affected hosts
-    - Timeline of activity
-    
-    Example request:
-    {
-        "indices": ["palo-xsiam-*", "crowdstrike-*"],
-        "category": "Malware",
-        "dayRange": 7,
-        "groupBy": "technique"
-    }
-    """
-    try:
-        valid_indices = filter_valid_indices(request.indices)
-        
-        if not valid_indices:
-            raise HTTPException(status_code=400, detail="No valid indices provided.")
-        
-        indices_status = await validate_indices(valid_indices)
-        existing_indices = [idx for idx, exists in indices_status.items() if exists]
-        
-        if not existing_indices:
-            raise HTTPException(
-                status_code=404,
-                detail=f"None of the provided indices exist: {valid_indices}"
-            )
-        
-        # Aggregate data
-        breakdown_data = {
-            "category": request.category,
-            "total_count": 0,
-            "techniques": {},
-            "tactics": {},
-            "hosts": {},
-            "timeline": {},
-            "sources": {}
-        }
-        
-        for index_pattern in existing_indices:
-            try:
-                field_mapping = get_field_mapping(index_pattern)
-                category_fields = get_category_fields(field_mapping)
-                
-                if not category_fields:
-                    continue
-                
-                # Build query to filter by category
-                query = {
-                    "bool": {
-                        "must": [],
-                        "filter": [
-                            {
-                                "range": {
-                                    field_mapping["timestamp_field"]: {
-                                        "gte": f"now-{request.dayRange}d",
-                                        "lte": "now"
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-                
-                # Add category filter (OR across all category fields)
-                category_filters = []
-                for field in category_fields:
-                    category_filters.append({"term": {field: request.category}})
-                
-                query["bool"]["must"].append({
-                    "bool": {"should": category_filters, "minimum_should_match": 1}
-                })
-                
-                # Build aggregations based on groupBy
-                aggs = {}
-                
-                if request.groupBy in ["technique", "all"]:
-                    if field_mapping.get("technique_id_field"):
-                        aggs["techniques"] = {
-                            "terms": {"field": field_mapping["technique_id_field"], "size": 50}
-                        }
-                    elif field_mapping.get("technique_field"):
-                        aggs["techniques"] = {
-                            "terms": {"field": field_mapping["technique_field"], "size": 50}
-                        }
-                
-                if request.groupBy in ["tactic", "all"]:
-                    if field_mapping.get("tactic_id_field"):
-                        aggs["tactics"] = {
-                            "terms": {"field": field_mapping["tactic_id_field"], "size": 20}
-                        }
-                    elif field_mapping.get("tactic_field"):
-                        aggs["tactics"] = {
-                            "terms": {"field": field_mapping["tactic_field"], "size": 20}
-                        }
-                
-                if request.groupBy in ["host", "all"]:
-                    # Always get top hosts
-                    host_field = get_host_field(field_mapping)
-                    aggs["hosts"] = {
-                        "terms": {"field": host_field, "size": 10}
-                    }
-                
-                # Timeline histogram (daily)
-                aggs["timeline"] = {
-                    "date_histogram": {
-                        "field": field_mapping["timestamp_field"],
-                        "calendar_interval": "day"
-                    }
-                }
-                
-                # Execute query
-                response = await es.search(
-                    index=index_pattern,
-                    body={
-                        "query": query,
-                        "size": 0,
-                        "aggs": aggs
-                    }
-                )
-                
-                # Check response validity
-                if not response or "hits" not in response:
-                    print(f"Invalid response from {index_pattern}")
-                    continue
-                
-                # Process results
-                index_count = response.get("hits", {}).get("total", {}).get("value", 0)
-                breakdown_data["total_count"] += index_count
-                breakdown_data["sources"][index_pattern] = index_count
-                
-                # Process techniques
-                if "techniques" in response.get("aggregations", {}):
-                    for bucket in response["aggregations"]["techniques"]["buckets"]:
-                        tech_value = bucket["key"]
-                        count = bucket["doc_count"]
-                        
-                        # Parse technique ID
-                        tech_id = tech_value.split(" - ")[0] if " - " in tech_value else tech_value
-                        
-                        if tech_id not in breakdown_data["techniques"]:
-                            breakdown_data["techniques"][tech_id] = {
-                                "technique_id": tech_id,
-                                "technique_name": get_technique_name(tech_id) or tech_id,
-                                "count": 0,
-                                "tactics": get_technique_tactics(tech_id),
-                                "sources": {}
-                            }
-                        
-                        breakdown_data["techniques"][tech_id]["count"] += count
-                        breakdown_data["techniques"][tech_id]["sources"][index_pattern] = count
-                
-                # Process tactics
-                if "tactics" in response.get("aggregations", {}):
-                    for bucket in response["aggregations"]["tactics"]["buckets"]:
-                        tactic_value = bucket["key"]
-                        count = bucket["doc_count"]
-                        
-                        tactic_id = tactic_value.split(" - ")[0] if " - " in tactic_value else tactic_value
-                        
-                        if tactic_id not in breakdown_data["tactics"]:
-                            breakdown_data["tactics"][tactic_id] = {
-                                "tactic_id": tactic_id,
-                                "tactic_name": get_tactic_name(tactic_id) or tactic_id,
-                                "count": 0
-                            }
-                        
-                        breakdown_data["tactics"][tactic_id]["count"] += count
-                
-                # Process hosts
-                if "hosts" in response.get("aggregations", {}):
-                    for bucket in response["aggregations"]["hosts"]["buckets"]:
-                        host = bucket["key"]
-                        count = bucket["doc_count"]
-                        
-                        if host not in breakdown_data["hosts"]:
-                            breakdown_data["hosts"][host] = 0
-                        breakdown_data["hosts"][host] += count
-                
-                # Process timeline
-                if "timeline" in response.get("aggregations", {}):
-                    for bucket in response["aggregations"]["timeline"]["buckets"]:
-                        date = bucket.get("key_as_string", bucket.get("key"))
-                        count = bucket["doc_count"]
-                        
-                        if date not in breakdown_data["timeline"]:
-                            breakdown_data["timeline"][date] = 0
-                        breakdown_data["timeline"][date] += count
-                
-            except ValueError as ve:
-                print(f"Skipping unsupported index {index_pattern}: {ve}")
-                continue
-            except KeyError as ke:
-                print(f"Missing key in breakdown response from {index_pattern}: {ke}")
-                import traceback
-                traceback.print_exc()
-                continue
-            except Exception as e:
-                print(f"Error processing index {index_pattern}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-        
-        # Format results
-        return {
-            "category": breakdown_data["category"],
-            "total_count": breakdown_data["total_count"],
-            "techniques": sorted(
-                breakdown_data["techniques"].values(),
-                key=lambda x: x["count"],
-                reverse=True
-            )[:20],
-            "tactics": sorted(
-                breakdown_data["tactics"].values(),
-                key=lambda x: x["count"],
-                reverse=True
-            ),
-            "top_hosts": [
-                {"host": host, "count": count}
-                for host, count in sorted(
-                    breakdown_data["hosts"].items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:10]
-            ],
-            "timeline": [
-                {"date": str(date), "count": count}
-                for date, count in sorted(breakdown_data["timeline"].items())
-            ],
-            "sources": breakdown_data["sources"],
-            "indices_queried": existing_indices
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error in category breakdown: {str(e)}")
-
-
-# ===================================
-# Endpoint 3: Cross-Index Category Comparison
-# ===================================
-
-@app.post("/api/unified/category-comparison", summary="Compare categories across different indices")
-async def get_category_comparison(request: CrossIndexCategoryRequest):
-    """
-    Compare the same categories across different data sources.
-    Useful for understanding coverage and detection differences.
-    
-    Example request:
-    {
-        "indices": ["palo-xsiam-*", "crowdstrike-*", "suricata-*"],
-        "dayRange": 7,
-        "categories": ["Malware", "C2", "Exploitation"]
-    }
-    """
-    try:
-        valid_indices = filter_valid_indices(request.indices)
-        
-        if not valid_indices:
-            raise HTTPException(status_code=400, detail="No valid indices provided.")
-        
-        indices_status = await validate_indices(valid_indices)
-        existing_indices = [idx for idx, exists in indices_status.items() if exists]
-        
-        if not existing_indices:
-            raise HTTPException(
-                status_code=404,
-                detail=f"None of the provided indices exist: {valid_indices}"
-            )
-        
-        # First, get all categories if not specified
-        if not request.categories:
-            # Get top categories across all indices
-            temp_request = CategoryStatsRequest(
-                indices=request.indices,
-                dayRange=request.dayRange,
-                limit=20
-            )
-            category_stats = await get_unified_category_stats(temp_request)
-            request.categories = [cat["name"] for cat in category_stats["categories"]]
-        
-        # Build comparison matrix
-        comparison_matrix = {}
-        
-        for category in request.categories:
-            comparison_matrix[category] = {
-                "category": category,
-                "total": 0,
-                "by_index": {}
-            }
-            
-            for index_pattern in existing_indices:
-                try:
-                    field_mapping = get_field_mapping(index_pattern)
-                    category_fields = get_category_fields(field_mapping)
-                    
-                    if not category_fields:
-                        comparison_matrix[category]["by_index"][index_pattern] = 0
-                        continue
-                    
-                    # Build query
-                    query = {
-                        "bool": {
-                            "must": [],
-                            "filter": [
-                                {
-                                    "range": {
-                                        field_mapping["timestamp_field"]: {
-                                            "gte": f"now-{request.dayRange}d",
-                                            "lte": "now"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                    
-                    # Filter by category
-                    category_filters = []
-                    for field in category_fields:
-                        category_filters.append({"term": {field: category}})
-                    
-                    query["bool"]["must"].append({
-                        "bool": {"should": category_filters, "minimum_should_match": 1}
-                    })
-                    
-                    # Execute count query
-                    response = await es.count(index=index_pattern, body={"query": query})
-                    count = response.get("count", 0)
-                    
-                    comparison_matrix[category]["by_index"][index_pattern] = count
-                    comparison_matrix[category]["total"] += count
-                    
-                except ValueError as ve:
-                    print(f"Skipping unsupported index {index_pattern}: {ve}")
-                    comparison_matrix[category]["by_index"][index_pattern] = 0
-                    continue
-                except Exception as e:
-                    print(f"Error processing {index_pattern} for category {category}: {e}")
-                    comparison_matrix[category]["by_index"][index_pattern] = 0
-                    continue
-        
-        # Calculate coverage analysis
-        coverage_analysis = {
-            "total_categories": len(request.categories),
-            "by_index": {}
-        }
-        
-        for index_pattern in existing_indices:
-            detected_categories = sum(
-                1 for cat_data in comparison_matrix.values()
-                if cat_data["by_index"].get(index_pattern, 0) > 0
-            )
-            coverage_percentage = (detected_categories / len(request.categories) * 100) if request.categories else 0
-            
-            coverage_analysis["by_index"][index_pattern] = {
-                "detected_categories": detected_categories,
-                "coverage_percentage": round(coverage_percentage, 2),
-                "total_events": sum(
-                    cat_data["by_index"].get(index_pattern, 0)
-                    for cat_data in comparison_matrix.values()
-                )
-            }
-        
-        # Format results
-        comparison_list = sorted(
-            comparison_matrix.values(),
-            key=lambda x: x["total"],
-            reverse=True
-        )
-        
-        return {
-            "comparison": comparison_list,
-            "coverage_analysis": coverage_analysis,
-            "time_range": {
-                "start": f"now-{request.dayRange}d",
-                "end": "now"
-            },
-            "indices_queried": existing_indices,
-            "categories_analyzed": len(request.categories)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error in category comparison: {str(e)}")
-    
-
-    
 @app.get("/", summary="Health Check")
 async def root():
     """Check if API is running"""
@@ -3600,9 +2654,6 @@ async def root():
                 "/api/unified/search",
                 "/api/unified/top-techniques",
                 "/api/unified/kill-chain",
-                "/api/unified/cyber-kill-chain"
-            ],
-            "category": [
                 "/api/unified/category-stats",
                 "/api/unified/category-breakdown",
                 "/api/unified/category-comparison"
