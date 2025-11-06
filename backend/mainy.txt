@@ -1,0 +1,292 @@
+# main.py
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
+from db import SessionLocal, Rtarf
+from elastic_client import es
+from dateutil import parser as dateparser   # pip install python-dateutil
+from sqlalchemy.exc import IntegrityError
+
+
+app = FastAPI()
+
+# Dependency for DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def _extract_fields(source):
+    # --- Palo-XSIAM ---
+    palo = source.get("palo-xsiam") or source
+    px_tactics = palo.get("mitre_tactics_ids_and_names")
+    px_techniques = palo.get("mitre_techniques_ids_and_names")
+    description = palo.get("description")
+    severity = palo.get("severity")
+    alert_categories = palo.get("alert_categories")
+
+    # --- CrowdStrike ---
+    cs_raw = source.get("crowdstrike", {}).get("event", {}).get("MitreAttack", [])
+
+    # normalize cs_raw to a list of dicts
+    if isinstance(cs_raw, dict):
+        cs_list = [cs_raw]
+    elif isinstance(cs_raw, list):
+        cs_list = cs_raw
+    else:
+        cs_list = []
+
+    # collect all fields across list items
+    cs_tactics = []
+    cs_tactics_ids = []
+    cs_techniques = []
+    cs_techniques_ids = []
+
+    for item in cs_list:
+        if not isinstance(item, dict):
+            continue
+        if item.get("Tactic"):
+            cs_tactics.append(item["Tactic"])
+        if item.get("TacticID"):
+            cs_tactics_ids.append(item["TacticID"])
+        if item.get("Technique"):
+            cs_techniques.append(item["Technique"])
+        if item.get("TechniqueID"):
+            cs_techniques_ids.append(item["TechniqueID"])
+
+    # --- normalize all lists ---
+    def normalize_list(val):
+        if val is None:
+            return []
+        if isinstance(val, str):
+            return [v.strip() for v in val.split(",")] if "," in val else [val]
+        if isinstance(val, list):
+            return val
+        return [val]
+
+    return {
+        "palo_tactics": normalize_list(px_tactics),
+        "palo_techniques": normalize_list(px_techniques),
+        "description": description,
+        "severity": severity,
+        "alert_categories": normalize_list(alert_categories),
+        "cs_tactics": normalize_list(cs_tactics),
+        "cs_tactics_ids": normalize_list(cs_tactics_ids),
+        "cs_techniques": normalize_list(cs_techniques),
+        "cs_techniques_ids": normalize_list(cs_techniques_ids)
+    }
+
+
+@app.get("/sync-rtarf")
+async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
+    query = {
+    "query": {
+        "bool": {
+            "should": [
+                { "exists": { "field": "palo-xsiam.mitre_tactics_ids_and_names" } },
+                { "exists": { "field": "crowdstrike.event.MitreAttack.Tactic" } }
+            ],
+            "minimum_should_match": 1  # at least one field must exist
+        }
+    }
+}
+    # use wildcard index pattern if you need
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
+
+    inserted = 0
+    updated = 0
+
+    for hit in resp["hits"]["hits"]:
+        source = hit.get("_source", {})
+        es_id = hit.get("_id")
+        fields = _extract_fields(source)
+
+        # parse timestamp if present
+        ts = source.get("@timestamp") or source.get("timestamp")
+        parsed_ts = None
+        if ts:
+            try:
+                parsed_ts = dateparser.parse(ts)
+            except Exception:
+                parsed_ts = None
+
+        
+        existing = db.query(Rtarf).filter(Rtarf.event_id == es_id).first()
+
+        if existing:
+            # update existing record
+            existing.mitre_tactics_ids_and_names = fields["palo_tactics"]
+            existing.mitre_techniques_ids_and_names = fields["palo_techniques"]
+            existing.description = fields["description"]
+            existing.severity = fields["severity"]
+            existing.alert_categories = fields["alert_categories"]
+            existing.crowdstrike_tactics = fields["cs_tactics"]
+            existing.crowdstrike_tactics_ids = fields["cs_tactics_ids"]
+            existing.crowdstrike_techniques = fields["cs_techniques"]
+            existing.crowdstrike_techniques_ids = fields["cs_techniques_ids"]
+            
+            if parsed_ts:
+                existing.timestamp = parsed_ts
+            updated += 1
+        else:
+             # Insert new record
+            rec = Rtarf(
+                event_id=es_id,
+                mitre_tactics_ids_and_names=fields["palo_tactics"],
+                mitre_techniques_ids_and_names=fields["palo_techniques"],
+                description=fields["description"],
+                severity=fields["severity"],
+                alert_categories=fields["alert_categories"],
+                crowdstrike_tactics=fields["cs_tactics"],
+                crowdstrike_tactics_ids=fields["cs_tactics_ids"],
+                crowdstrike_techniques=fields["cs_techniques"],
+                crowdstrike_techniques_ids=fields["cs_techniques_ids"],
+                timestamp=parsed_ts
+            )
+            db.add(rec)
+            inserted += 1
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return {"error": "integrity error inserting records - check unique constraints"}
+
+    return {"inserted": inserted, "updated": updated}
+
+@app.get("/sync-rtarf-all")
+async def sync_rtarf_all(db: Session = Depends(get_db)):
+    scroll_time = "2m"
+    batch_size = 500
+    commit_every = 100  # commit every N records
+    
+    total_fetched = 0
+    total_inserted = 0
+    total_updated = 0
+    
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}},
+                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+    
+    scroll_id = None
+    try:
+        # Initial search
+        resp = await es.search(
+            index="rtarf-events-beat*",
+            body=query,
+            scroll=scroll_time,
+            size=batch_size
+        )
+        scroll_id = resp["_scroll_id"]
+        
+        batch_count = 0
+        
+        while True:
+            hits = resp["hits"]["hits"]
+            if not hits:
+                break
+            
+            for hit in hits:
+                try:
+                    source = hit.get("_source", {})
+                    es_id = hit.get("_id")
+                    fields = _extract_fields(source)
+                    
+                    # Parse timestamp with error handling
+                    ts = source.get("@timestamp") or source.get("timestamp")
+                    parsed_ts = None
+                    if ts:
+                        try:
+                            parsed_ts = dateparser.parse(ts)
+                        except Exception as e:
+                            print(f"Failed to parse timestamp for {es_id}: {e}")
+                    
+                    existing = db.query(Rtarf).filter(Rtarf.event_id == es_id).first()
+                    
+                    if existing:
+                        # Update
+                        existing.mitre_tactics_ids_and_names = fields["palo_tactics"]
+                        existing.mitre_techniques_ids_and_names = fields["palo_techniques"]
+                        existing.description = fields["description"]
+                        existing.severity = fields["severity"]
+                        existing.alert_categories = fields["alert_categories"]
+                        existing.crowdstrike_tactics = fields["cs_tactics"]
+                        existing.crowdstrike_tactics_ids = fields["cs_tactics_ids"]
+                        existing.crowdstrike_techniques = fields["cs_techniques"]
+                        existing.crowdstrike_techniques_ids = fields["cs_techniques_ids"]
+                        if parsed_ts:
+                            existing.timestamp = parsed_ts
+                        total_updated += 1
+                    else:
+                        # Insert
+                        rec = Rtarf(
+                            event_id=es_id,
+                            mitre_tactics_ids_and_names=fields["palo_tactics"],
+                            mitre_techniques_ids_and_names=fields["palo_techniques"],
+                            description=fields["description"],
+                            severity=fields["severity"],
+                            alert_categories=fields["alert_categories"],
+                            crowdstrike_tactics=fields["cs_tactics"],
+                            crowdstrike_tactics_ids=fields["cs_tactics_ids"],
+                            crowdstrike_techniques=fields["cs_techniques"],
+                            crowdstrike_techniques_ids=fields["cs_techniques_ids"],
+                            timestamp=parsed_ts
+                        )
+                        db.add(rec)
+                        total_inserted += 1
+                    
+                    batch_count += 1
+                    
+                    # Commit in batches
+                    if batch_count >= commit_every:
+                        db.commit()
+                        batch_count = 0
+                        
+                except Exception as e:
+                    print(f"Error processing document {hit.get('_id')}: {e}")
+                    continue
+            
+            total_fetched += len(hits)
+            print(f"Fetched {total_fetched} documents...")
+            
+            # Fetch next batch
+            resp = await es.scroll(scroll_id=scroll_id, scroll=scroll_time)
+            
+        # Final commit for remaining records
+        if batch_count > 0:
+            db.commit()
+            
+    except Exception as e:
+        db.rollback()
+        return {"error": f"Sync failed: {str(e)}"}
+    finally:
+        # Always cleanup scroll context
+        if scroll_id:
+            try:
+                await es.clear_scroll(scroll_id=scroll_id)
+            except Exception as e:
+                print(f"Failed to clear scroll: {e}")
+    
+    return {
+        "fetched": total_fetched,
+        "inserted": total_inserted,
+        "updated": total_updated
+    }
+    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

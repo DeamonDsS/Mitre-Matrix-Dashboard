@@ -1,6 +1,5 @@
 // services/mockMLKillChainService.ts
 // Use this mock service during development, then swap to real API when ready
-import { fetchCyberKillChainCoverage } from "./killChainService";
 
 export interface MLPredictionRequest {
   indices: string[];

@@ -31,3 +31,9 @@ numpy
 imbalanced-learn==0.11.0
 matplotlib==3.8.2
 seaborn==0.13.0
+
+# Database ProgreSQL
+psycopg2-binary
+sqlalchemy
+
+# http://127.0.0.1:8000/sync-rtarf

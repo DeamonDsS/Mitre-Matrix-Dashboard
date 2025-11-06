@@ -1,45 +1,55 @@
 // SummaryView.tsx
 import React from "react";
-import { Bar, Pie, Line } from "react-chartjs-2";
+import { Bar, Pie } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
   BarElement,
-  PointElement,
-  LineElement,
   Title,
   Tooltip,
   Legend,
   ArcElement,
 } from "chart.js";
-import { TrendingUp, Shield, Target, Activity } from "lucide-react";
-import type { UnifiedStats } from "../../services/multiMitreService";
+import { TrendingUp, Target } from "lucide-react";
+import type { SoloSummaryStats } from "../../services/multiMitreService";
 
 // Register Chart.js components
 ChartJS.register(
   CategoryScale,
   LinearScale,
   BarElement,
-  PointElement,
-  LineElement,
   Title,
   Tooltip,
   Legend,
   ArcElement
 );
 
+export interface SummaryStats {
+  total: number; // จำนวนเหตุการณ์ทั้งหมดใน index เดียว
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  tactics: Array<{
+    id: string;               // MITRE tactic ID เช่น TA0001
+    name: string;             // ชื่อ tactic เช่น "Initial Access"
+    count: number;            // จำนวน detection ที่อยู่ใน tactic นั้น
+    sources: Record<string, number>; // breakdown ต่อ source ภายใน tactic เดียว
+  }>;
+  sources: Record<string, number>;   // breakdown รวมทุก tactic แยกตาม source
+}
+
 interface SummaryViewProps {
-  stats: UnifiedStats;
+  stats: SummaryStats;
   loading: boolean;
-  selectedIndices: string[];
   dayRange: number;
 }
+
 
 const SummaryView: React.FC<SummaryViewProps> = ({
   stats,
   loading,
-  selectedIndices,
   dayRange,
 }) => {
   if (loading) {
@@ -53,7 +63,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
     );
   }
 
-  // Data for Tactics Distribution Bar Chart
+  // Data for Top 10 Tactics Bar Chart
   const tacticsData = {
     labels: stats.tactics.slice(0, 10).map((t) => t.name || t.id),
     datasets: [
@@ -67,85 +77,41 @@ const SummaryView: React.FC<SummaryViewProps> = ({
     ],
   };
 
-  // Data for Sources Distribution Pie Chart
-  const sourcesData = {
-    labels: Object.keys(stats.sources),
-    datasets: [
-      {
-        label: "Events by Source",
-        data: Object.values(stats.sources),
-        backgroundColor: [
-          "rgba(239, 68, 68, 0.6)",
-          "rgba(249, 115, 22, 0.6)",
-          "rgba(234, 179, 8, 0.6)",
-          "rgba(59, 130, 246, 0.6)",
-          "rgba(139, 92, 246, 0.6)",
-        ],
-        borderWidth: 1,
-      },
-    ],
-  };
+  const severityData = {
+  labels: ["critical", "high", "medium", "low"],
+  datasets: [
+    {
+      label: "Detections by Severity",
+      data: [stats.critical, stats.high, stats.medium, stats.low],
+      backgroundColor: [
+        "rgba(239, 68, 68, 0.6)", // Critical
+        "rgba(249, 115, 22, 0.6)", // High
+        "rgba(234, 179, 8, 0.6)", // Medium
+        "rgba(59, 130, 246, 0.6)", // Low
+      ],
+      borderWidth: 1,
+    },
+  ],
+};
 
-  // Data for Source Breakdown Bar Chart
-  const sourceBreakdownData = {
-    labels: stats.breakdown.map((b) => b.index.split("-")[0]),
-    datasets: [
-      {
-        label: "Total Events",
-        data: stats.breakdown.map((b) => b.total),
-        backgroundColor: "rgba(59, 130, 246, 0.6)",
-        borderColor: "rgba(59, 130, 246, 1)",
-        borderWidth: 1,
-      },
-      {
-        label: "Unique Tactics",
-        data: stats.breakdown.map((b) => b.tactics),
-        backgroundColor: "rgba(139, 92, 246, 0.6)",
-        borderColor: "rgba(139, 92, 246, 1)",
-        borderWidth: 1,
-      },
-    ],
-  };
-
+  // Shared Chart Options
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
       legend: {
         position: "top" as const,
-        labels: {
-          color: "#9CA3AF",
-          font: {
-            size: 12,
-          },
-        },
-      },
-      title: {
-        display: false,
+        labels: { color: "#9CA3AF", font: { size: 12 } },
       },
     },
     scales: {
       x: {
-        ticks: {
-          color: "#9CA3AF",
-          font: {
-            size: 11,
-          },
-        },
-        grid: {
-          color: "rgba(75, 85, 99, 0.3)",
-        },
+        ticks: { color: "#9CA3AF", font: { size: 11 } },
+        grid: { color: "rgba(75,85,99,0.3)" },
       },
       y: {
-        ticks: {
-          color: "#9CA3AF",
-          font: {
-            size: 11,
-          },
-        },
-        grid: {
-          color: "rgba(75, 85, 99, 0.3)",
-        },
+        ticks: { color: "#9CA3AF", font: { size: 11 } },
+        grid: { color: "rgba(75,85,99,0.3)" },
       },
     },
   };
@@ -156,16 +122,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
     plugins: {
       legend: {
         position: "right" as const,
-        labels: {
-          color: "#9CA3AF",
-          font: {
-            size: 12,
-          },
-          padding: 15,
-        },
-      },
-      title: {
-        display: false,
+        labels: { color: "#9CA3AF", font: { size: 12 }, padding: 15 },
       },
     },
   };
@@ -174,21 +131,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
     <div className="space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-400 text-sm mb-1">Total Events</p>
-              <p className="text-2xl font-bold text-white">
-                {stats.total.toLocaleString()}
-              </p>
-            </div>
-            <div className="p-3 bg-red-600 rounded-lg">
-              <Activity className="w-6 h-6 text-white" />
-            </div>
-          </div>
-          <p className="text-xs text-gray-500 mt-2">Last {dayRange} days</p>
-        </div> */}
-
+        {/* Active Tactics */}
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">
             <div>
@@ -201,24 +144,12 @@ const SummaryView: React.FC<SummaryViewProps> = ({
               <Target className="w-6 h-6 text-white" />
             </div>
           </div>
-          <p className="text-xs text-gray-500 mt-2">Unique MITRE tactics</p>
+          <p className="text-xs text-gray-200 mt-2">
+            Unique MITRE Tactics in last {dayRange} days
+          </p>
         </div>
 
-        {/* <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-400 text-sm mb-1">Data Sources</p>
-              <p className="text-2xl font-bold text-white">
-                {selectedIndices.length}
-              </p>
-            </div>
-            <div className="p-3 bg-blue-600 rounded-lg">
-              <Shield className="w-6 h-6 text-white" />
-            </div>
-          </div>
-          <p className="text-xs text-gray-500 mt-2">Active indices</p>
-        </div> */}
-
+        {/* Top Tactic */}
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div className="flex items-center justify-between">
             <div>
@@ -231,7 +162,7 @@ const SummaryView: React.FC<SummaryViewProps> = ({
               <TrendingUp className="w-6 h-6 text-white" />
             </div>
           </div>
-          <p className="text-xs text-gray-500 mt-2">
+          <p className="text-xs text-gray-200 mt-2">
             {stats.tactics[0]?.name || "N/A"}
           </p>
         </div>
@@ -249,23 +180,13 @@ const SummaryView: React.FC<SummaryViewProps> = ({
           </div>
         </div>
 
-        {/* Sources Distribution */}
+        {/* Severity Distribution */}
         <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
           <h3 className="text-lg font-semibold text-white mb-4">
-            Events Distribution by Source
+            Detection Distribution by Severity
           </h3>
           <div style={{ height: "300px" }}>
-            <Pie options={pieOptions} data={sourcesData} />
-          </div>
-        </div>
-
-        {/* Source Breakdown */}
-        <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 lg:col-span-2">
-          <h3 className="text-lg font-semibold text-white mb-4">
-            Source Breakdown Analysis
-          </h3>
-          <div style={{ height: "300px" }}>
-            <Bar options={chartOptions} data={sourceBreakdownData} />
+            <Pie options={pieOptions} data={severityData} />
           </div>
         </div>
       </div>
@@ -296,25 +217,13 @@ const SummaryView: React.FC<SummaryViewProps> = ({
                 <th className="px-4 py-3 text-right text-gray-400 font-medium">
                   Percentage
                 </th>
-                <th className="px-4 py-3 text-left text-gray-400 font-medium">
-                  Top Source
-                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-700">
               {stats.tactics.map((tactic, index) => {
-                const percentage = ((tactic.count / stats.total) * 100).toFixed(
-                  1
-                );
-                const topSource = Object.entries(tactic.sources).sort(
-                  ([, a], [, b]) => b - a
-                )[0];
-
+                const percentage = ((tactic.count / stats.total) * 100).toFixed(1);
                 return (
-                  <tr
-                    key={tactic.id}
-                    className="hover:bg-gray-750 transition-colors"
-                  >
+                  <tr key={tactic.id} className="hover:bg-gray-750 transition-colors">
                     <td className="px-4 py-3 text-gray-400">{index + 1}</td>
                     <td className="px-4 py-3">
                       <span className="text-red-400 font-mono text-xs">
@@ -327,11 +236,6 @@ const SummaryView: React.FC<SummaryViewProps> = ({
                     </td>
                     <td className="px-4 py-3 text-right">
                       <span className="text-blue-400">{percentage}%</span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">
-                      {topSource
-                        ? `${topSource[0].split("-")[0]} (${topSource[1]})`
-                        : "N/A"}
                     </td>
                   </tr>
                 );

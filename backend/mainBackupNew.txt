@@ -47,14 +47,8 @@ def _extract_fields(source):
     alert_categories = palo.get("alert_categories")
 
     # --- CrowdStrike ---
-    cs_event = source.get("crowdstrike", {}).get("event", {})
     cs_raw = source.get("crowdstrike", {}).get("event", {}).get("MitreAttack", [])
     cs_severity = source.get("crowdstrike", {}).get("event", {}).get("SeverityName")
-    cs_event_name = cs_event.get("Name")  
-    cs_event_objective = cs_event.get("Objective") 
-    
-    # --- Suricata ---
-    suricata_class = source.get("suricata", {}).get("classification")
     
 
     # normalize cs_raw to a list of dicts
@@ -94,9 +88,6 @@ def _extract_fields(source):
         return [val]
     
     cs_severity = cs_severity if isinstance(cs_severity, str) else None
-    cs_event_name = cs_event_name if isinstance(cs_event_name, str) else None
-    cs_event_objective = cs_event_objective if isinstance(cs_event_objective, str) else None
-    suricata_class = suricata_class if isinstance(suricata_class, str) else None
 
     return {
         "palo_tactics": normalize_list(px_tactics),
@@ -108,10 +99,7 @@ def _extract_fields(source):
         "cs_tactics_ids": normalize_list(cs_tactics_ids),
         "cs_techniques": normalize_list(cs_techniques),
         "cs_techniques_ids": normalize_list(cs_techniques_ids),
-        "cs_severity": cs_severity,
-        "cs_event_name": cs_event_name,
-        "cs_event_objective": cs_event_objective,
-        "suricata_classification": suricata_class
+        "cs_severity": cs_severity
     }
 
 
@@ -139,9 +127,6 @@ async def _bulk_upsert_records(db: Session, records: list):
             'crowdstrike_techniques': stmt.excluded.crowdstrike_techniques,
             'crowdstrike_techniques_ids': stmt.excluded.crowdstrike_techniques_ids,
             'crowdstrike_severity': stmt.excluded.crowdstrike_severity,
-            'crowdstrike_event_name': stmt.excluded.crowdstrike_event_name,  # NEW
-            'crowdstrike_event_objective': stmt.excluded.crowdstrike_event_objective,  # NEW
-            'suricata_classification': stmt.excluded.suricata_classification,  # NEW
             'timestamp': stmt.excluded.timestamp,
         }
         
@@ -247,10 +232,7 @@ async def _sync_rtarf_background(
                         "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
                         "crowdstrike_techniques": fields["cs_techniques"],
                         "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-                        "crowdstrike_severity":fields["cs_severity"],
-                        "crowdstrike_event_name":fields["cs_event_name"],
-                        "crowdstrike_event_objective":fields["cs_event_objective"],
-                        "suricata_classification": fields["suricata_classification"],
+                        "crowdstrike_severity":fields["cs_severity"],  # VARCHAR(50)
                         "timestamp": parsed_ts
                     }
                     
@@ -332,7 +314,7 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
         }
     }
     
-    resp = await es.search(index="rtarf-events-beat*", body=query, size=500)
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=400)
     
     record_batch = []
     
@@ -360,10 +342,7 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
             "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
             "crowdstrike_techniques": fields["cs_techniques"],
             "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-            "crowdstrike_severity": fields["cs_severity"],  
-            "crowdstrike_event_name":fields["cs_event_name"],
-            "crowdstrike_event_objective":fields["cs_event_objective"],
-            "suricata_classification": fields["suricata_classification"],
+            "crowdstrike_severity": fields["cs_severity"],  # ADD THIS
             "timestamp": parsed_ts
         }
         record_batch.append(record)
@@ -418,10 +397,7 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
             "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
             "crowdstrike_techniques": fields["cs_techniques"],
             "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-            "crowdstrike_severity": fields["cs_severity"],
-            "crowdstrike_event_name":fields["cs_event_name"],
-            "crowdstrike_event_objective":fields["cs_event_objective"],
-            "suricata_classification": fields["suricata_classification"],
+            "crowdstrike_severity": fields["cs_severity"],  # ADD THIS
             "timestamp": parsed_ts
         }
         record_batch.append(record)
@@ -432,122 +408,7 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         return {"error": "integrity error inserting records"}
-    
-@app.get("/sync-rtarf-suricata")
-async def sync_rtarf_suricata(db: Session = Depends(get_db)):
-    """Sync only Suricata events"""
-    query = {
-        "query": {
-            "bool": {
-                "should": [
-                    {"exists": {"field": "suricata.classification"}}
-                ],
-                "minimum_should_match": 1
-            }
-        }
-    }
-    
-    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
-    
-    record_batch = []
-    
-    for hit in resp["hits"]["hits"]:
-        source = hit.get("_source", {})
-        es_id = hit.get("_id")
-        fields = _extract_fields(source)
-        
-        ts = source.get("@timestamp") or source.get("timestamp")
-        parsed_ts = None
-        if ts:
-            try:
-                parsed_ts = dateparser.parse(ts)
-            except Exception:
-                parsed_ts = None
-        
-        record = {
-            "event_id": es_id,
-            "mitre_tactics_ids_and_names": fields["palo_tactics"],
-            "mitre_techniques_ids_and_names": fields["palo_techniques"],
-            "description": fields["description"],
-            "severity": fields["severity"],
-            "alert_categories": fields["alert_categories"],
-            "crowdstrike_tactics": fields["cs_tactics"],
-            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
-            "crowdstrike_techniques": fields["cs_techniques"],
-            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-            "crowdstrike_severity": fields["cs_severity"],
-            "crowdstrike_event_name": fields["cs_event_name"],
-            "crowdstrike_event_objective": fields["cs_event_objective"],
-            "suricata_classification": fields["suricata_classification"],
-            "timestamp": parsed_ts
-        }
-        record_batch.append(record)
-    
-    try:
-        inserted, updated = await _bulk_upsert_records(db, record_batch)
-        return {"inserted": len(record_batch), "updated": 0}
-    except IntegrityError:
-        db.rollback()
-        return {"error": "integrity error inserting records"}
-    
 
-@app.get("/sync-rtarf-crowdstrike")
-async def sync_rtarf_suricata(db: Session = Depends(get_db)):
-    """Sync only Suricata events"""
-    query = {
-        "query": {
-            "bool": {
-                "should": [
-                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
-                ],
-                "minimum_should_match": 1
-            }
-        }
-    }
-    
-    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
-    
-    record_batch = []
-    
-    for hit in resp["hits"]["hits"]:
-        source = hit.get("_source", {})
-        es_id = hit.get("_id")
-        fields = _extract_fields(source)
-        
-        ts = source.get("@timestamp") or source.get("timestamp")
-        parsed_ts = None
-        if ts:
-            try:
-                parsed_ts = dateparser.parse(ts)
-            except Exception:
-                parsed_ts = None
-        
-        record = {
-            "event_id": es_id,
-            "mitre_tactics_ids_and_names": fields["palo_tactics"],
-            "mitre_techniques_ids_and_names": fields["palo_techniques"],
-            "description": fields["description"],
-            "severity": fields["severity"],
-            "alert_categories": fields["alert_categories"],
-            "crowdstrike_tactics": fields["cs_tactics"],
-            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
-            "crowdstrike_techniques": fields["cs_techniques"],
-            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-            "crowdstrike_severity": fields["cs_severity"],
-            "crowdstrike_event_name": fields["cs_event_name"],
-            "crowdstrike_event_objective": fields["cs_event_objective"],
-            "suricata_classification": fields["suricata_classification"],
-            "timestamp": parsed_ts
-        }
-        record_batch.append(record)
-    
-    try:
-        inserted, updated = await _bulk_upsert_records(db, record_batch)
-        return {"inserted": len(record_batch), "updated": 0}
-    except IntegrityError:
-        db.rollback()
-        return {"error": "integrity error inserting records"}
-    
 
 @app.post("/sync-rtarf-all")
 async def sync_rtarf_all(

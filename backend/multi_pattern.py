@@ -1531,7 +1531,8 @@ async def get_unified_technique_stats(request: UnifiedTechniqueRequest):
                 import traceback
                 traceback.print_exc()
                 continue
-        
+
+        # unified_stats = compute_severity(count, last_seen, tech.tactic)
         # Calculate severity based on total counts
         for tech_id, stats in unified_stats.items():
             count = stats["count"]
@@ -1993,8 +1994,8 @@ async def search_unified(request: UnifiedSearchRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error in unified search: {str(e)}")
 
-# Add these models near the other Pydantic models section
 
+# Add these models near the other Pydantic models section
 class TopTechniquesRequest(BaseModel):
     """Request for top detected techniques"""
     indices: List[str]
@@ -2010,8 +2011,6 @@ class TopTechniqueResult(BaseModel):
     tactic_ids: List[str]
     tactic_names: List[str]
     sources: Dict[str, int]  # index -> count
-
-# Add this endpoint with the other unified endpoints
 
 @app.post("/api/unified/top-techniques", summary="Get top N most detected techniques across indices")
 async def get_top_techniques(request: TopTechniquesRequest):
@@ -3598,9 +3597,9 @@ async def root():
                 "/api/unified/technique-stats",
                 "/api/unified/stats",
                 "/api/unified/search",
-                "/api/unified/top-techniques",
-                "/api/unified/kill-chain",
-                "/api/unified/cyber-kill-chain"
+                "/api/unified/top-techniques", # Not support All index yet
+                "/api/unified/kill-chain", # Not support All index yet
+                "/api/unified/cyber-kill-chain" # Not support All index yet
             ],
             "category": [
                 "/api/unified/category-stats",

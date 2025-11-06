@@ -138,9 +138,9 @@ services:
       dockerfile: Dockerfile
     container_name: security-backend
     environment:
-      - ES_URL=http://elasticsearch:9200
-      # - ES_USER=elastic
-      # - ES_PASS=changeme
+      - ES_URL=https://10.141.98.45:31900
+      - ES_USER=86JTjRyfarMZ6cP5
+      - ES_PASS=dbpJwZIg56nfwLN8
       - PORT=8000
       - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
     ports:

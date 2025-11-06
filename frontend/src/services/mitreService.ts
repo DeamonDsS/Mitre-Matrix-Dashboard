@@ -307,7 +307,7 @@ export const fetchAllTechniqueStats = async (
     }));
 
     // 2. เรียกไปยัง Endpoint ของ FastAPI เพียงครั้งเดียว
-    const response = await fetch('http://localhost:8000/api/technique-stats', {
+    const response = await fetch(`${BACKEND_API_URL}'/api/technique-stats`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
