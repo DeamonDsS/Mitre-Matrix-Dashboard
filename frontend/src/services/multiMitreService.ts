@@ -92,6 +92,15 @@ export interface UnifiedStatsRequest {
   dayRange?: number;
 }
 
+export interface SoloSummaryStats {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  tactics: number;
+}
+
 export interface UnifiedStats {
   total: number;
   tactics: Array<{
