@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  # === Frontend (React Build) ===
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mitre-frontend
+    command: ["npm", "run", "build"]
+    networks:
+      - elastic-network
+    restart: unless-stopped
+
+networks:
+  elastic-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+

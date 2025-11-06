@@ -9,4 +9,3 @@ es = AsyncElasticsearch(
     http_auth=(os.getenv("ES_USER"), os.getenv("ES_PASS")),
     verify_certs=False
 )
-

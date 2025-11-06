@@ -1,392 +1,607 @@
 # main.py
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from elasticsearch import Elasticsearch
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
-from datetime import datetime
-import os
-from dotenv import load_dotenv
+from fastapi import FastAPI, Depends, BackgroundTasks, Query
+from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert
+from db import SessionLocal, Rtarf, init_db
+from elastic_client import es
+from dateutil import parser as dateparser
+from sqlalchemy.exc import IntegrityError
+from typing import Optional
+import logging
+import uuid
 
-load_dotenv()
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="MITRE ATT&CK Security Events API")
+app = FastAPI()
 
-# CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on application startup"""
+    logger.info("Initializing database tables...")
+    init_db()
+    logger.info("Database ready!")
 
-# Elasticsearch Configuration
-ES_URL = os.getenv("ES_URL", "http://localhost:9200")
-ES_USER = os.getenv("ES_USER", "")
-ES_PASS = os.getenv("ES_PASS", "")
-
-# Initialize Elasticsearch client
-if ES_USER and ES_PASS:
-    es = Elasticsearch([ES_URL], basic_auth=(ES_USER, ES_PASS))
-else:
-    es = Elasticsearch([ES_URL])
-
-# Pydantic Models
-class SearchRequest(BaseModel):
-    search: Optional[str] = None
-    tactic: Optional[str] = "all"
-    severity: Optional[str] = "all"
-    size: Optional[int] = 100
-
-class MitreTechnique(BaseModel):
-    id: str
-    technique_id: str
-    technique_name: str
-    tactic: str
-    description: str
-    severity: str
-    timestamp: str
-    platform: List[str]
-    event_code: str
-    host_name: str
-    user_name: str
-    process_name: str
-    log_level: str
-    channel: str
-
-class SearchRequest(BaseModel):
-    search: Optional[str] = None
-    tactic: Optional[str] = "all"
-    severity: Optional[str] = "all"
-    size: Optional[int] = 10
-    page: Optional[int] = 1 # เพิ่ม page เข้ามา
-
-# MITRE ATT&CK Mapping
-EVENT_SEVERITY_MAP = {
-    # Security Events - Logon/Logoff
-    "4624": {"severity": "low", "category": "Account Logon Success"},
-    "4625": {"severity": "medium", "category": "Account Logon Failed"},
-    "4634": {"severity": "low", "category": "Account Logged Off"},
-    "4647": {"severity": "low", "category": "User Initiated Logoff"},
-    "4648": {"severity": "medium", "category": "Logon Using Explicit Credentials"},
-    "4672": {"severity": "high", "category": "Special Privileges Assigned"},
-    "4768": {"severity": "low", "category": "Kerberos TGT Requested"},
-    "4769": {"severity": "low", "category": "Kerberos Service Ticket"},
-    "4771": {"severity": "high", "category": "Kerberos Pre-Auth Failed"},
-    "4776": {"severity": "medium", "category": "Credential Validation Attempted"},
-    
-    # Process Events
-    "4688": {"severity": "low", "category": "New Process Created"},
-    "4689": {"severity": "low", "category": "Process Terminated"},
-    
-    # Account Management
-    "4720": {"severity": "medium", "category": "User Account Created"},
-    "4722": {"severity": "medium", "category": "User Account Enabled"},
-    "4723": {"severity": "medium", "category": "Password Change Attempted"},
-    "4724": {"severity": "medium", "category": "Password Reset Attempted"},
-    "4725": {"severity": "medium", "category": "User Account Disabled"},
-    "4726": {"severity": "medium", "category": "User Account Deleted"},
-    "4732": {"severity": "high", "category": "Member Added to Security Group"},
-    "4733": {"severity": "high", "category": "Member Removed from Security Group"},
-    "4738": {"severity": "medium", "category": "User Account Changed"},
-    "4740": {"severity": "high", "category": "User Account Locked Out"},
-    "4756": {"severity": "high", "category": "Member Added to Universal Group"},
-    
-    # Service Events
-    "4697": {"severity": "high", "category": "Service Installed"},
-    "7045": {"severity": "high", "category": "Service Installed (System)"},
-    "7036": {"severity": "low", "category": "Service State Changed"},
-    "7040": {"severity": "medium", "category": "Service Start Type Changed"},
-    
-    # Security Log Events
-    "1102": {"severity": "critical", "category": "Audit Log Cleared"},
-    "1104": {"severity": "critical", "category": "Security Log Full"},
-    "1105": {"severity": "high", "category": "Audit Log Cleared"},
-    
-    # Object Access
-    "4656": {"severity": "low", "category": "Handle to Object Requested"},
-    "4663": {"severity": "low", "category": "Object Access Attempted"},
-    "4670": {"severity": "medium", "category": "Object Permissions Changed"},
-    
-    # Policy Change
-    "4719": {"severity": "high", "category": "System Audit Policy Changed"},
-    "4739": {"severity": "high", "category": "Domain Policy Changed"},
-    
-    # System Events
-    "10016": {"severity": "low", "category": "DCOM Permission Error"},
-    "7000": {"severity": "medium", "category": "Service Failed to Start"},
-    "7001": {"severity": "medium", "category": "Service Dependency Failed"},
-    "7034": {"severity": "medium", "category": "Service Crashed"},
-    "6005": {"severity": "low", "category": "Event Log Service Started"},
-    "6006": {"severity": "low", "category": "Event Log Service Stopped"},
-    "6008": {"severity": "high", "category": "Unexpected Shutdown"},
-    
-    # Application Events
-    "1000": {"severity": "medium", "category": "Application Error"},
-    "1001": {"severity": "medium", "category": "Application Hang"},
-    "1002": {"severity": "high", "category": "Application Crash"},
-    
-    # Windows Defender
-    "1116": {"severity": "high", "category": "Malware Detected"},
-    "1117": {"severity": "high", "category": "Malware Blocked"},
-    "5001": {"severity": "medium", "category": "Real-time Protection Disabled"},
+# Store sync status (in production, use Redis or database)
+sync_status = {
+    "is_running": False,
+    "last_run": None,
+    "last_result": None
 }
 
-EVENT_TACTIC_MAP = {
-    # Initial Access
-    "4624": "Initial Access",
-    "4625": "Initial Access",
-    "4648": "Lateral Movement",
-    
-    # Execution
-    "4688": "Execution",
-    "4689": "Execution",
-    
-    # Persistence
-    "4697": "Persistence",
-    "7045": "Persistence",
-    "4720": "Persistence",
-    "7040": "Persistence",
-    
-    # Privilege Escalation
-    "4672": "Privilege Escalation",
-    "4732": "Privilege Escalation",
-    "4756": "Privilege Escalation",
-    
-    # Defense Evasion
-    "1102": "Defense Evasion",
-    "1104": "Defense Evasion",
-    "1105": "Defense Evasion",
-    "4719": "Defense Evasion",
-    "5001": "Defense Evasion",
-    
-    # Credential Access
-    "4771": "Credential Access",
-    "4776": "Credential Access",
-    "4768": "Credential Access",
-    "4769": "Credential Access",
-    
-    # Discovery
-    "10016": "Discovery",
-    "4656": "Discovery",
-    "4663": "Discovery",
-    
-    # Impact
-    "1116": "Impact",
-    "1117": "Impact",
-    "6008": "Impact",
-    "7034": "Impact",
-}
+# Dependency for DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def map_event_to_mitre(hit: Dict[str, Any]) -> Dict[str, Any]:
-    """Map Elasticsearch event to MITRE ATT&CK format"""
-    source = hit.get("_source", {})
+def _extract_fields(source):
+    """Extract and normalize fields from Elasticsearch document"""
+    # --- Palo-XSIAM ---
+    palo = source.get("palo-xsiam") or source
+    px_tactics = palo.get("mitre_tactics_ids_and_names")
+    px_techniques = palo.get("mitre_techniques_ids_and_names")
+    description = palo.get("description")
+    severity = palo.get("severity")
+    alert_categories = palo.get("alert_categories")
+
+    # --- CrowdStrike ---
+    cs_event = source.get("crowdstrike", {}).get("event", {})
+    cs_raw = source.get("crowdstrike", {}).get("event", {}).get("MitreAttack", [])
+    cs_severity = source.get("crowdstrike", {}).get("event", {}).get("SeverityName")
+    cs_event_name = cs_event.get("Name")  
+    cs_event_objective = cs_event.get("Objective") 
     
-    # Extract event code
-    event_code = (
-        source.get("event", {}).get("code") or
-        str(source.get("winlog", {}).get("event_id", "")) or
-        "unknown"
-    )
+    # --- Suricata ---
+    suricata_class = source.get("suricata", {}).get("classification")
     
-    event_info = EVENT_SEVERITY_MAP.get(event_code, {
-        "severity": "medium",
-        "category": "Unknown Event"
-    })
+
+    # normalize cs_raw to a list of dicts
+    if isinstance(cs_raw, dict):
+        cs_list = [cs_raw]
+    elif isinstance(cs_raw, list):
+        cs_list = cs_raw
+    else:
+        cs_list = []
+
+    # collect all fields across list items
+    cs_tactics = []
+    cs_tactics_ids = []
+    cs_techniques = []
+    cs_techniques_ids = []
+
+    for item in cs_list:
+        if not isinstance(item, dict):
+            continue
+        if item.get("Tactic"):
+            cs_tactics.append(item["Tactic"])
+        if item.get("TacticID"):
+            cs_tactics_ids.append(item["TacticID"])
+        if item.get("Technique"):
+            cs_techniques.append(item["Technique"])
+        if item.get("TechniqueID"):
+            cs_techniques_ids.append(item["TechniqueID"])
+
+    # --- normalize all lists ---
+    def normalize_list(val):
+        if val is None:
+            return []
+        if isinstance(val, str):
+            return [v.strip() for v in val.split(",")] if "," in val else [val]
+        if isinstance(val, list):
+            return val
+        return [val]
     
-    # Extract user information
-    user_name = (
-        source.get("user", {}).get("name") or
-        source.get("winlog", {}).get("event_data", {}).get("TargetUserName") or
-        source.get("winlog", {}).get("event_data", {}).get("SubjectUserName") or
-        (source.get("related", {}).get("user", []) or ["N/A"])[0]
-    )
-    
-    # Extract host information
-    host_name = (
-        source.get("host", {}).get("name") or
-        source.get("host", {}).get("hostname") or
-        source.get("agent", {}).get("name") or
-        source.get("winlog", {}).get("computer_name") or
-        "Unknown Host"
-    )
-    
-    # Extract process information
-    process_name = (
-        source.get("process", {}).get("name") or
-        source.get("process", {}).get("executable") or
-        source.get("winlog", {}).get("event_data", {}).get("ProcessName") or
-        source.get("winlog", {}).get("event_data", {}).get("NewProcessName") or
-        ""
-    )
-    
-    # Extract channel
-    channel = (
-        source.get("winlog", {}).get("channel") or
-        source.get("event", {}).get("module") or
-        "Unknown"
-    )
-    
-    # Extract log level
-    log_level = (
-        source.get("log", {}).get("level") or
-        source.get("winlog", {}).get("level") or
-        "info"
-    )
-    
-    # Build description
-    description = source.get("message", "No description available")
-    if len(description) > 250:
-        first_paragraph = description.split("\n\n")[0]
-        if first_paragraph and len(first_paragraph) <= 250:
-            description = first_paragraph
-        else:
-            description = description[:250] + "..."
-    
-    # Extract platform
-    platform = (
-        source.get("host", {}).get("os", {}).get("family") or
-        source.get("host", {}).get("os", {}).get("platform") or
-        "Windows"
-    )
-    
+    cs_severity = cs_severity if isinstance(cs_severity, str) else None
+    cs_event_name = cs_event_name if isinstance(cs_event_name, str) else None
+    cs_event_objective = cs_event_objective if isinstance(cs_event_objective, str) else None
+    suricata_class = suricata_class if isinstance(suricata_class, str) else None
+
     return {
-        "id": hit["_id"],
-        "technique_id": f"Event-{event_code}",
-        "technique_name": event_info["category"],
-        "tactic": EVENT_TACTIC_MAP.get(event_code, "Discovery"),
+        "palo_tactics": normalize_list(px_tactics),
+        "palo_techniques": normalize_list(px_techniques),
         "description": description,
-        "severity": event_info["severity"],
-        "timestamp": source.get("@timestamp", datetime.utcnow().isoformat()),
-        "platform": [platform],
-        "event_code": event_code,
-        "host_name": host_name,
-        "user_name": user_name,
-        "process_name": process_name,
-        "log_level": log_level,
-        "channel": channel,
+        "severity": severity,
+        "alert_categories": normalize_list(alert_categories),
+        "cs_tactics": normalize_list(cs_tactics),
+        "cs_tactics_ids": normalize_list(cs_tactics_ids),
+        "cs_techniques": normalize_list(cs_techniques),
+        "cs_techniques_ids": normalize_list(cs_techniques_ids),
+        "cs_severity": cs_severity,
+        "cs_event_name": cs_event_name,
+        "cs_event_objective": cs_event_objective,
+        "suricata_classification": suricata_class
     }
 
-@app.get("/")
-async def root():
-    """API health check"""
-    return {
-        "status": "ok",
-        "service": "MITRE ATT&CK Security Events API",
-        "version": "1.0.0",
-        "elasticsearch": {
-            "connected": es.ping(),
-            "url": ES_URL
-        }
-    }
 
-@app.post("/api/search")
-async def search_events(
-    index: str = Query(..., description="Elasticsearch index pattern"),
-    request: SearchRequest = SearchRequest()
-):
-    """Search Windows events and map to MITRE ATT&CK"""
+async def _bulk_upsert_records(db: Session, records: list):
+    """
+    Perform bulk upsert using PostgreSQL's ON CONFLICT DO UPDATE
+    This is much faster than individual inserts/updates
+    """
+    if not records:
+        return 0, 0
+    
     try:
-        # Build Elasticsearch query
-        query = {"bool": {"must": []}}
+        # Use PostgreSQL's INSERT ... ON CONFLICT for upsert
+        stmt = insert(Rtarf).values(records)
         
-        if request.search:
-            query["bool"]["must"].append({
-                "multi_match": {
-                    "query": request.search,
-                    "fields": [
-                        "event.code",
-                        "message",
-                        "winlog.event_data.*",
-                        "host.name",
-                        "user.name"
-                    ],
-                    "fuzziness": "AUTO"
-                }
-            })
-        
-        # Execute search
-        body = {
-            "query": query if query["bool"]["must"] else {"match_all": {}},
-            "size": request.size,
-            "sort": [{"@timestamp": {"order": "desc"}}]
+        # Define what to do on conflict (when event_id already exists)
+        update_dict = {
+            'mitre_tactics_ids_and_names': stmt.excluded.mitre_tactics_ids_and_names,
+            'mitre_techniques_ids_and_names': stmt.excluded.mitre_techniques_ids_and_names,
+            'description': stmt.excluded.description,
+            'severity': stmt.excluded.severity,
+            'alert_categories': stmt.excluded.alert_categories,
+            'crowdstrike_tactics': stmt.excluded.crowdstrike_tactics,
+            'crowdstrike_tactics_ids': stmt.excluded.crowdstrike_tactics_ids,
+            'crowdstrike_techniques': stmt.excluded.crowdstrike_techniques,
+            'crowdstrike_techniques_ids': stmt.excluded.crowdstrike_techniques_ids,
+            'crowdstrike_severity': stmt.excluded.crowdstrike_severity,
+            'crowdstrike_event_name': stmt.excluded.crowdstrike_event_name,  # NEW
+            'crowdstrike_event_objective': stmt.excluded.crowdstrike_event_objective,  # NEW
+            'suricata_classification': stmt.excluded.suricata_classification,  # NEW
+            'timestamp': stmt.excluded.timestamp,
         }
         
-        response = es.search(index=index, body=body)
-        
-        # Map events to MITRE format
-        events = [map_event_to_mitre(hit) for hit in response["hits"]["hits"]]
-        
-        # Apply filters
-        if request.tactic and request.tactic != "all":
-            events = [e for e in events if e["tactic"] == request.tactic]
-        
-        if request.severity and request.severity != "all":
-            events = [e for e in events if e["severity"] == request.severity]
-        
-        return {
-            "total": len(events),
-            "events": events,
-            "took": response["took"],
-            "timed_out": response["timed_out"]
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/stats")
-async def get_statistics(index: str = Query(...)):
-    """Get statistics about security events"""
-    try:
-        response = es.search(
-            index=index,
-            body={
-                "size": 0,
-                "aggs": {
-                    "event_codes": {
-                        "terms": {"field": "event.code", "size": 20}
-                    },
-                    "hosts": {
-                        "terms": {"field": "host.name.keyword", "size": 10}
-                    },
-                    "users": {
-                        "terms": {"field": "user.name.keyword", "size": 10}
-                    }
-                }
-            }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['event_id'],
+            set_=update_dict
         )
         
-        return {
-            "total_events": response["hits"]["total"]["value"],
-            "top_event_codes": response["aggregations"]["event_codes"]["buckets"],
-            "top_hosts": response["aggregations"]["hosts"]["buckets"],
-            "top_users": response["aggregations"]["users"]["buckets"]
-        }
+        result = db.execute(stmt)
+        db.commit()
+        
+        # Note: PostgreSQL doesn't return which were inserts vs updates easily
+        # We return the total count
+        return len(records), 0
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        db.rollback()
+        logger.error(f"Bulk upsert failed: {e}")
+        raise
 
-@app.get("/api/tactics")
-async def get_tactics():
-    """Get all MITRE ATT&CK tactics"""
-    unique_tactics = sorted(set(EVENT_TACTIC_MAP.values()))
-    return {"tactics": unique_tactics}
 
-@app.get("/api/health")
-async def health_check():
-    """Detailed health check"""
-    es_healthy = es.ping()
-    return {
-        "status": "healthy" if es_healthy else "unhealthy",
-        "elasticsearch": {
-            "connected": es_healthy,
-            "url": ES_URL,
-            "cluster_name": es.info()["cluster_name"] if es_healthy else None
-        },
-        "timestamp": datetime.utcnow().isoformat()
+async def _sync_rtarf_background(
+    max_records: Optional[int] = None,
+    batch_size: int = 500,
+    commit_batch_size: int = 100
+):
+    """
+    Background task for syncing RTARF data
+    This runs asynchronously without blocking the API response
+    """
+    from datetime import datetime
+    
+    logger.info(f"Starting background sync (max_records={max_records})")
+    sync_status["is_running"] = True
+    sync_status["last_run"] = datetime.utcnow().isoformat()
+    
+    db = SessionLocal()
+    scroll_time = "2m"
+    total_fetched = 0
+    total_inserted = 0
+    total_updated = 0
+    scroll_id = None
+    
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}},
+                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
     }
+    
+    try:
+        # Initial search
+        resp = await es.search(
+            index="rtarf-events-beat*",
+            body=query,
+            scroll=scroll_time,
+            size=batch_size
+        )
+        scroll_id = resp["_scroll_id"]
+        
+        # Batch accumulator for bulk operations
+        record_batch = []
+        
+        while True:
+            hits = resp["hits"]["hits"]
+            if not hits:
+                break
+            
+            # Check if we've reached the limit
+            if max_records and total_fetched >= max_records:
+                logger.info(f"Reached max_records limit: {max_records}")
+                break
+            
+            for hit in hits:
+                try:
+                    source = hit.get("_source", {})
+                    es_id = hit.get("_id")
+                    fields = _extract_fields(source)
+                    
+                    # Parse timestamp with error handling
+                    ts = source.get("@timestamp") or source.get("timestamp")
+                    parsed_ts = None
+                    if ts:
+                        try:
+                            parsed_ts = dateparser.parse(ts)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse timestamp for {es_id}: {e}")
+                    
+                    # Build record dict for bulk operation
+                    record = {
+                        "event_id": es_id,
+                        "mitre_tactics_ids_and_names": fields["palo_tactics"],
+                        "mitre_techniques_ids_and_names": fields["palo_techniques"],
+                        "description": fields["description"],
+                        "severity": fields["severity"],
+                        "alert_categories": fields["alert_categories"],
+                        "crowdstrike_tactics": fields["cs_tactics"],
+                        "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
+                        "crowdstrike_techniques": fields["cs_techniques"],
+                        "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
+                        "crowdstrike_severity":fields["cs_severity"],
+                        "crowdstrike_event_name":fields["cs_event_name"],
+                        "crowdstrike_event_objective":fields["cs_event_objective"],
+                        "suricata_classification": fields["suricata_classification"],
+                        "timestamp": parsed_ts
+                    }
+                    
+                    record_batch.append(record)
+                    
+                    # Perform bulk upsert when batch is full
+                    if len(record_batch) >= commit_batch_size:
+                        inserted, updated = await _bulk_upsert_records(db, record_batch)
+                        total_inserted += inserted
+                        total_updated += updated
+                        logger.info(f"Bulk upserted {len(record_batch)} records")
+                        record_batch = []
+                    
+                except Exception as e:
+                    logger.error(f"Error processing document {hit.get('_id')}: {e}")
+                    continue
+            
+            total_fetched += len(hits)
+            logger.info(f"Fetched {total_fetched} documents...")
+            
+            # Check limit again
+            if max_records and total_fetched >= max_records:
+                break
+            
+            # Fetch next batch
+            resp = await es.scroll(scroll_id=scroll_id, scroll=scroll_time)
+        
+        # Final bulk upsert for remaining records
+        if record_batch:
+            inserted, updated = await _bulk_upsert_records(db, record_batch)
+            total_inserted += inserted
+            total_updated += updated
+            logger.info(f"Final bulk upsert of {len(record_batch)} records")
+        
+        result = {
+            "status": "success",
+            "fetched": total_fetched,
+            "inserted": total_inserted,
+            "updated": total_updated
+        }
+        
+        logger.info(f"Sync complete: {result}")
+        sync_status["last_result"] = result
+        
+    except Exception as e:
+        error_msg = f"Sync failed: {str(e)}"
+        logger.error(error_msg)
+        sync_status["last_result"] = {
+            "status": "error",
+            "error": error_msg,
+            "fetched": total_fetched
+        }
+        db.rollback()
+        
+    finally:
+        sync_status["is_running"] = False
+        db.close()
+        
+        # Always cleanup scroll context
+        if scroll_id:
+            try:
+                await es.clear_scroll(scroll_id=scroll_id)
+            except Exception as e:
+                logger.error(f"Failed to clear scroll: {e}")
+
+
+@app.get("/sync-rtarf")
+async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
+    """Original sync endpoint - synchronous, limited to 100 records"""
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}},
+                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+    
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=300)
+    
+    record_batch = []
+    
+    for hit in resp["hits"]["hits"]:
+        source = hit.get("_source", {})
+        es_id = hit.get("_id")
+        fields = _extract_fields(source)
+        
+        ts = source.get("@timestamp") or source.get("timestamp")
+        parsed_ts = None
+        if ts:
+            try:
+                parsed_ts = dateparser.parse(ts)
+            except Exception:
+                parsed_ts = None
+        
+        record = {
+            "event_id": es_id,
+            "mitre_tactics_ids_and_names": fields["palo_tactics"],
+            "mitre_techniques_ids_and_names": fields["palo_techniques"],
+            "description": fields["description"],
+            "severity": fields["severity"],
+            "alert_categories": fields["alert_categories"],
+            "crowdstrike_tactics": fields["cs_tactics"],
+            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
+            "crowdstrike_techniques": fields["cs_techniques"],
+            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
+            "crowdstrike_severity": fields["cs_severity"],  
+            "crowdstrike_event_name":fields["cs_event_name"],
+            "crowdstrike_event_objective":fields["cs_event_objective"],
+            "suricata_classification": fields["suricata_classification"],
+            "timestamp": parsed_ts
+        }
+        record_batch.append(record)
+    
+    try:
+        inserted, updated = await _bulk_upsert_records(db, record_batch)
+        return {"inserted": len(record_batch), "updated": 0}
+    except IntegrityError:
+        db.rollback()
+        return {"error": "integrity error inserting records"}
+    
+
+@app.get("/sync-rtarf-palo")
+async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
+    """Original sync endpoint - synchronous, limited to 100 records"""
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+    
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
+    
+    record_batch = []
+    
+    for hit in resp["hits"]["hits"]:
+        source = hit.get("_source", {})
+        es_id = hit.get("_id")
+        fields = _extract_fields(source)
+        
+        ts = source.get("@timestamp") or source.get("timestamp")
+        parsed_ts = None
+        if ts:
+            try:
+                parsed_ts = dateparser.parse(ts)
+            except Exception:
+                parsed_ts = None
+        
+        record = {
+            "event_id": es_id,
+            "mitre_tactics_ids_and_names": fields["palo_tactics"],
+            "mitre_techniques_ids_and_names": fields["palo_techniques"],
+            "description": fields["description"],
+            "severity": fields["severity"],
+            "alert_categories": fields["alert_categories"],
+            "crowdstrike_tactics": fields["cs_tactics"],
+            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
+            "crowdstrike_techniques": fields["cs_techniques"],
+            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
+            "crowdstrike_severity": fields["cs_severity"],
+            "crowdstrike_event_name":fields["cs_event_name"],
+            "crowdstrike_event_objective":fields["cs_event_objective"],
+            "suricata_classification": fields["suricata_classification"],
+            "timestamp": parsed_ts
+        }
+        record_batch.append(record)
+    
+    try:
+        inserted, updated = await _bulk_upsert_records(db, record_batch)
+        return {"inserted": len(record_batch), "updated": 0}
+    except IntegrityError:
+        db.rollback()
+        return {"error": "integrity error inserting records"}
+    
+@app.get("/sync-rtarf-suricata")
+async def sync_rtarf_suricata(db: Session = Depends(get_db)):
+    """Sync only Suricata events"""
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "suricata.classification"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+    
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
+    
+    record_batch = []
+    
+    for hit in resp["hits"]["hits"]:
+        source = hit.get("_source", {})
+        es_id = hit.get("_id")
+        fields = _extract_fields(source)
+        
+        ts = source.get("@timestamp") or source.get("timestamp")
+        parsed_ts = None
+        if ts:
+            try:
+                parsed_ts = dateparser.parse(ts)
+            except Exception:
+                parsed_ts = None
+        
+        record = {
+            "event_id": es_id,
+            "mitre_tactics_ids_and_names": fields["palo_tactics"],
+            "mitre_techniques_ids_and_names": fields["palo_techniques"],
+            "description": fields["description"],
+            "severity": fields["severity"],
+            "alert_categories": fields["alert_categories"],
+            "crowdstrike_tactics": fields["cs_tactics"],
+            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
+            "crowdstrike_techniques": fields["cs_techniques"],
+            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
+            "crowdstrike_severity": fields["cs_severity"],
+            "crowdstrike_event_name": fields["cs_event_name"],
+            "crowdstrike_event_objective": fields["cs_event_objective"],
+            "suricata_classification": fields["suricata_classification"],
+            "timestamp": parsed_ts
+        }
+        record_batch.append(record)
+    
+    try:
+        inserted, updated = await _bulk_upsert_records(db, record_batch)
+        return {"inserted": len(record_batch), "updated": 0}
+    except IntegrityError:
+        db.rollback()
+        return {"error": "integrity error inserting records"}
+    
+
+@app.get("/sync-rtarf-crowdstrike")
+async def sync_rtarf_suricata(db: Session = Depends(get_db)):
+    """Sync only Suricata events"""
+    query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+    
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=100)
+    
+    record_batch = []
+    
+    for hit in resp["hits"]["hits"]:
+        source = hit.get("_source", {})
+        es_id = hit.get("_id")
+        fields = _extract_fields(source)
+        
+        ts = source.get("@timestamp") or source.get("timestamp")
+        parsed_ts = None
+        if ts:
+            try:
+                parsed_ts = dateparser.parse(ts)
+            except Exception:
+                parsed_ts = None
+        
+        record = {
+            "event_id": es_id,
+            "mitre_tactics_ids_and_names": fields["palo_tactics"],
+            "mitre_techniques_ids_and_names": fields["palo_techniques"],
+            "description": fields["description"],
+            "severity": fields["severity"],
+            "alert_categories": fields["alert_categories"],
+            "crowdstrike_tactics": fields["cs_tactics"],
+            "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
+            "crowdstrike_techniques": fields["cs_techniques"],
+            "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
+            "crowdstrike_severity": fields["cs_severity"],
+            "crowdstrike_event_name": fields["cs_event_name"],
+            "crowdstrike_event_objective": fields["cs_event_objective"],
+            "suricata_classification": fields["suricata_classification"],
+            "timestamp": parsed_ts
+        }
+        record_batch.append(record)
+    
+    try:
+        inserted, updated = await _bulk_upsert_records(db, record_batch)
+        return {"inserted": len(record_batch), "updated": 0}
+    except IntegrityError:
+        db.rollback()
+        return {"error": "integrity error inserting records"}
+    
+
+@app.post("/sync-rtarf-all")
+async def sync_rtarf_all(
+    background_tasks: BackgroundTasks,
+    max_records: Optional[int] = Query(None, description="Maximum number of records to sync (None for all)"),
+    batch_size: int = Query(500, description="Elasticsearch scroll batch size"),
+    commit_batch_size: int = Query(100, description="Database commit batch size")
+):
+    """
+    Start background sync of RTARF data from Elasticsearch to PostgreSQL
+    
+    - **max_records**: Limit total records to sync (useful for testing)
+    - **batch_size**: How many records to fetch per Elasticsearch scroll
+    - **commit_batch_size**: How many records to bulk upsert at once
+    
+    Returns immediately with sync started in background
+    """
+    if sync_status["is_running"]:
+        return {
+            "status": "already_running",
+            "message": "A sync is already in progress",
+            "last_run": sync_status["last_run"]
+        }
+    
+    # Start background task
+    background_tasks.add_task(
+        _sync_rtarf_background,
+        max_records=max_records,
+        batch_size=batch_size,
+        commit_batch_size=commit_batch_size
+    )
+    
+    return {
+        "status": "started",
+        "message": "Sync started in background",
+        "max_records": max_records,
+        "batch_size": batch_size,
+        "commit_batch_size": commit_batch_size
+    }
+
+
+@app.get("/sync-status")
+async def get_sync_status():
+    """Check the status of background sync operations"""
+    return sync_status
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

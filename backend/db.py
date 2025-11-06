@@ -1,9 +1,14 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+# db.py
+import os
+from sqlalchemy import Text, create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
-DATABASE_URL = "postgresql://postgres:patpimol00823@localhost:5432/esData"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:patpimol00823@localhost:5432/esData"
+)
 
 engine = create_engine(DATABASE_URL, echo=True)  # echo=True to see SQL queries
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -35,6 +40,32 @@ class Rtarf(Base):
     suricata_classification = Column(String)
 
     timestamp = Column(DateTime, default=datetime.utcnow)
+    
+class SyncStatus(Base):
+    """Table to track sync job status"""
+    __tablename__ = "sync_status"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String, unique=True, index=True, nullable=False)
+    status = Column(String, nullable=False)  # 'running', 'completed', 'failed'
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Sync parameters
+    max_records = Column(Integer, nullable=True)
+    batch_size = Column(Integer, nullable=False, default=500)
+    commit_batch_size = Column(Integer, nullable=False, default=100)
+    
+    # Results
+    records_fetched = Column(Integer, nullable=False, default=0)
+    records_inserted = Column(Integer, nullable=False, default=0)
+    records_updated = Column(Integer, nullable=False, default=0)
+    
+    # Error tracking
+    error_message = Column(Text, nullable=True)
+    
+    # Progress tracking
+    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 # Create tables

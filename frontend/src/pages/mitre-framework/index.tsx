@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Shield, Search, RefreshCw, Calendar, Grid3x3, BarChart3, TrendingUp, PieChart } from "lucide-react";
+import { Shield, Search, RefreshCw, Calendar, Grid3x3, BarChart3, TrendingUp } from "lucide-react";
 import TechniqueCard from "../../components/mitreCard/TechniqueCard";
 import TechniqueModal from "../../components/mitreCard/TechniqueModal";
 import type {
@@ -10,36 +10,23 @@ import type {
 import { loadMitreData } from "../../components/mitreCard/mitreData";
 import { getSeverityColor } from "../../components/mitreCard/mitreData";
 
-// Elasticsearch service
-import {
-  fetchAllTechniqueStatsWithDateRange,
-  fetchStats,
-} from "../../services/mitreService";
 
 // PostgreSQL service 
 import {
-  fetchPostgresTechniqueStats, fetchPostgresStats,
-  type TechniqueStatsRequest, fetchPostgresSummaryStats,
+  fetchPostgresStats,
+  fetchPostgresSummaryStats,
   fetchPostgresAggregateStats,
   flattenTechniqueStats,
   type FlattenedTechniqueStats,
 } from "../../services/postgreService";
 
 import SummaryView, { type SummaryStats } from "../../components/mitreCard/SummaryView";
-import CoveragedashboardMl from "../../components/mitreCard/CoverageDashboardMl";
-import CategoryDashboard from "../../components/CategoryDashboard/CategoryDashboard";
 import type { SoloSummaryStats } from "../../services/multiMitreService";
 import CoveragedashboardStat from "../killchain";
 
 type ViewMode = "matrix" | "summary" | "kill chain";
 type DataSourceType = "elasticsearch" | "postgresql";
 
-// Unified stats type for both sources (matching TechniqueStatsFramework)
-interface UnifiedTechniqueStats {
-  count: number;
-  severity: "critical" | "high" | "medium" | "low" | "none";
-  lastSeen: string | null;
-}
 
 const MitreAttackNavigator: React.FC = () => {
   const [selectedTechnique, setSelectedTechnique] =
@@ -130,11 +117,6 @@ const MitreAttackNavigator: React.FC = () => {
     return !techniqueId.includes('.');
   };
 
-  // Helper function to get parent technique ID from sub-technique
-  const getParentTechniqueId = (techniqueId: string): string | null => {
-    const match = techniqueId.match(/^(T\d+)\./);
-    return match ? match[1] : null;
-  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -175,9 +157,9 @@ const MitreAttackNavigator: React.FC = () => {
   }, [dateRange]);
 
   // Load technique statistics
-  const loadStats = async (techniquesData: MitreTechniqueFramework[]) => {
+  const loadStats = async (_techniquesData: MitreTechniqueFramework[]) => {
     try {
-      if (dataSourceType === "postgresql") {
+      
         console.log("🚀 Fetching stats from PostgreSQL using aggregate endpoint");
 
         const dayRange = getDaysInRange();
@@ -201,20 +183,7 @@ const MitreAttackNavigator: React.FC = () => {
           techniquesCount: Object.keys(aggregateResponse.techniques).length,
           severityCounts: aggregateResponse.severityCounts,
         });
-      } else {
-        console.log("🚀 Fetching stats from Elasticsearch:", ES_INDEX);
 
-        const stats = await fetchAllTechniqueStatsWithDateRange(
-          techniquesData,
-          ES_INDEX,
-          {
-            start: new Date(dateRange.start + "T00:00:00.000Z").toISOString(),
-            end: new Date(dateRange.end + "T23:59:59.999Z").toISOString(),
-          }
-        );
-
-        setTechniqueStats(stats as any);
-      }
     } catch (error) {
       console.error("Error loading stats:", error);
       setTechniqueStats({});
@@ -226,9 +195,7 @@ const MitreAttackNavigator: React.FC = () => {
     try {
       const dayRange = getDaysInRange();
 
-      if (dataSourceType === "postgresql") {
         console.log("🚀 Fetching overall stats from PostgreSQL");
-
         // Get calculated severity from aggregate endpoint (technique-based)
         const aggregateResponse = await fetchPostgresAggregateStats({
           dayRange: dayRange,
@@ -268,19 +235,7 @@ const MitreAttackNavigator: React.FC = () => {
 
         // Set event-level severity (direct from events)
         setEventStats(eventStatsData);
-      } else {
-        console.log("🚀 Fetching overall stats from Elasticsearch");
-
-        const statsData = await fetchStats(ES_INDEX, {
-          search: undefined,
-          tactic: "all",
-          severity: "all",
-          dayRange: dayRange,
-        });
-
-        setStats(statsData);
-        setEventStats(statsData);
-      }
+     
     } catch (error) {
       console.error("Error loading overall stats:", error);
       setStats({
@@ -591,7 +546,7 @@ const MitreAttackNavigator: React.FC = () => {
             <div className="grid grid-cols-3 gap-3 mb-4">
               <div className="bg-gray-900 rounded p-3">
                 <div className="text-gray-400 text-xs mb-1">
-                  Total Events ({getDaysInRange()} Days)
+                  Detected Events ({getDaysInRange()} Days)
                 </div>
                 <div className="text-2xl font-bold text-white">
                   {stats.total.toLocaleString()}
@@ -613,6 +568,40 @@ const MitreAttackNavigator: React.FC = () => {
               </div>
             </div>
           )}
+
+          
+          {/* Severity from event logs */}
+          {viewMode === "matrix" && (
+            <div className="grid grid-cols-4 gap-3 mb-4">
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">
+                  Critical Severity (Event)
+                </div>
+                <div className="text-2xl font-bold text-white">
+                  {eventStats.critical.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">High Severity (Event)</div>
+                <div className="text-2xl font-bold text-white">
+                  {eventStats.high.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">Medium Severity (Event)</div>
+                <div className="text-2xl font-bold text-white">
+                  {eventStats.medium.toLocaleString()}
+                </div>
+              </div>
+              <div className="bg-gray-900 rounded p-3">
+                <div className="text-gray-400 text-xs mb-1">Low Severity (Event)</div>
+                <div className="text-2xl font-bold text-white">
+                  {eventStats.low.toLocaleString()}
+                </div>
+              </div>
+            </div>
+          )}
+
 
           {/* Calculated severity from techniques and sub-techniques */}
           {viewMode === "matrix" && (
@@ -641,38 +630,6 @@ const MitreAttackNavigator: React.FC = () => {
                 <div className="text-gray-400 text-xs mb-1">Low Severity (Calculated)</div>
                 <div className="text-2xl font-bold text-white">
                   {stats.low.toLocaleString()}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Severity from event logs */}
-          {viewMode === "matrix" && (
-            <div className="grid grid-cols-4 gap-3 mb-4">
-              <div className="bg-gray-900 rounded p-3">
-                <div className="text-gray-400 text-xs mb-1">
-                  Critical Severity (Event)
-                </div>
-                <div className="text-2xl font-bold text-white">
-                  {eventStats.critical.toLocaleString()}
-                </div>
-              </div>
-              <div className="bg-gray-900 rounded p-3">
-                <div className="text-gray-400 text-xs mb-1">High Severity (Event)</div>
-                <div className="text-2xl font-bold text-white">
-                  {eventStats.high.toLocaleString()}
-                </div>
-              </div>
-              <div className="bg-gray-900 rounded p-3">
-                <div className="text-gray-400 text-xs mb-1">Medium Severity (Event)</div>
-                <div className="text-2xl font-bold text-white">
-                  {eventStats.medium.toLocaleString()}
-                </div>
-              </div>
-              <div className="bg-gray-900 rounded p-3">
-                <div className="text-gray-400 text-xs mb-1">Low Severity (Event)</div>
-                <div className="text-2xl font-bold text-white">
-                  {eventStats.low.toLocaleString()}
                 </div>
               </div>
             </div>
@@ -818,6 +775,7 @@ const MitreAttackNavigator: React.FC = () => {
                 <CoveragedashboardStat
                   selectedIndices={ES_INDEX}
                   dayRange={getDaysInRange()}
+            
                 />
               </div>
           </div>

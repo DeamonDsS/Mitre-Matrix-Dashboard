@@ -12,12 +12,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     networks:
       - elastic-network
+    ports:
+      - "5432:5432"
 
-  # === FastAPI Backend Instance 1 (Port 8000) ===
+   # === FastAPI Backend (Instance 1) ===
   backend1:
     build:
       context: ./backend
@@ -30,15 +30,15 @@ services:
       ES_USER: ${ES_USER}
       ES_PASS: ${ES_PASS}
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
     depends_on:
       - postgres
-    expose:
-      - "8000"
-    restart: unless-stopped
     networks:
       - elastic-network
+    restart: unless-stopped
 
-  # === FastAPI Backend Instance 2 (Port 8001) ===
+  # === FastAPI Backend (Instance 2) ===
   backend2:
     build:
       context: ./backend
@@ -51,43 +51,13 @@ services:
       ES_USER: ${ES_USER}
       ES_PASS: ${ES_PASS}
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
     depends_on:
       - postgres
-    expose:
-      - "8001"
+    networks:
+      - elastic-network
     restart: unless-stopped
-    networks:
-      - elastic-network
-
-  # === Frontend Build (React) ===
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: mitre-frontend
-    command: ["npm", "run", "build"]
-    volumes:
-      - ./frontend/build:/usr/share/nginx/html   # ✅ สร้างไฟล์ build ให้ nginx ใช้
-    restart: on-failure
-    networks:
-      - elastic-network
-
-  # === Nginx Reverse Proxy ===
-  nginx:
-    image: nginx:latest
-    container_name: nginx
-    depends_on:
-      - backend1
-      - backend2
-      - frontend
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
-      - ./frontend/build:/usr/share/nginx/html  # ✅ React build
-    restart: unless-stopped
-    networks:
-      - elastic-network
 
 networks:
   elastic-network:

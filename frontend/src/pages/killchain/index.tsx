@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
     Activity,
-    TrendingUp,
     Shield,
     AlertTriangle,
     Target,
@@ -12,9 +11,6 @@ import {
     CheckCircle2,
     XCircle,
     Info,
-    Brain,
-    ToggleLeft,
-    ToggleRight,
     Tag,
 } from 'lucide-react';
 
@@ -27,18 +23,16 @@ import {
     getPhaseThreadLevel,
     getPhaseMetadata,
     getDetectionVolumeColorScheme,
-    getDetectionSourceBreakdown,
     exportToCSV,
     generateExecutiveReport,
     type PostgresCyberKillChainResponse,
-    type PhaseCoverage,
-    type DetectionSource,
 } from '../../services/postgresKillChainService';
 
 interface KillChainDashboardProps {
     selectedIndices: string;
     dayRange: number;
     onDayRangeChange?: (days: number) => void;
+    // loading: boolean;
 }
 
 const initialKillChainState: PostgresCyberKillChainResponse = {
@@ -52,7 +46,8 @@ const initialKillChainState: PostgresCyberKillChainResponse = {
 const CoveragedashboardStat: React.FC<KillChainDashboardProps> = ({
     selectedIndices,
     dayRange,
-    onDayRangeChange
+    onDayRangeChange,
+    // loading,
 }) => {
     const [loading, setLoading] = useState(true);
     const [killChainData, setKillChainData] = useState<PostgresCyberKillChainResponse>(initialKillChainState);

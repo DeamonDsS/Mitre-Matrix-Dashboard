@@ -1,33 +1,3 @@
-// export interface MitreTechnique {
-//   id: string;
-//   technique_id: string;
-//   technique_name: string;
-//   tactic: string;
-//   description: string;
-//   severity: 'low' | 'medium' | 'high' | 'critical';
-//   timestamp: string;
-//   source?: string;
-//   platform?: string[];
-// }
-
-// export interface ElasticsearchResponse {
-//   hits: {
-//     total: {
-//       value: number;
-//     };
-//     hits: Array<{
-//       _id: string;
-//       _source: MitreTechnique;
-//     }>;
-//   };
-// }
-
-// export interface FilterState {
-//   search: string;
-//   tactic: string;
-//   severity: string;
-// }
-
 export interface MitreTechnique {
   id: string;
   technique_id: string;

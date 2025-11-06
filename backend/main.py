@@ -1,12 +1,15 @@
-from fastapi import FastAPI, Depends, BackgroundTasks, Query
+from fastapi import FastAPI, Depends, BackgroundTasks, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert
-from db import SessionLocal, Rtarf, init_db
+from sqlalchemy import desc
+from db import SessionLocal, Rtarf, SyncStatus, init_db
 from elastic_client import es
 from dateutil import parser as dateparser
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
+from datetime import datetime
 import logging
+import uuid
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,12 +24,6 @@ async def startup_event():
     init_db()
     logger.info("Database ready!")
 
-# Store sync status (in production, use Redis or database)
-sync_status = {
-    "is_running": False,
-    "last_run": None,
-    "last_result": None
-}
 
 # Dependency for DB session
 def get_db():
@@ -35,6 +32,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
 
 def _extract_fields(source):
     """Extract and normalize fields from Elasticsearch document"""
@@ -56,7 +54,6 @@ def _extract_fields(source):
     # --- Suricata ---
     suricata_class = source.get("suricata", {}).get("classification")
     
-
     # normalize cs_raw to a list of dicts
     if isinstance(cs_raw, dict):
         cs_list = [cs_raw]
@@ -139,9 +136,9 @@ async def _bulk_upsert_records(db: Session, records: list):
             'crowdstrike_techniques': stmt.excluded.crowdstrike_techniques,
             'crowdstrike_techniques_ids': stmt.excluded.crowdstrike_techniques_ids,
             'crowdstrike_severity': stmt.excluded.crowdstrike_severity,
-            'crowdstrike_event_name': stmt.excluded.crowdstrike_event_name,  # NEW
-            'crowdstrike_event_objective': stmt.excluded.crowdstrike_event_objective,  # NEW
-            'suricata_classification': stmt.excluded.suricata_classification,  # NEW
+            'crowdstrike_event_name': stmt.excluded.crowdstrike_event_name,
+            'crowdstrike_event_objective': stmt.excluded.crowdstrike_event_objective,
+            'suricata_classification': stmt.excluded.suricata_classification,
             'timestamp': stmt.excluded.timestamp,
         }
         
@@ -153,8 +150,6 @@ async def _bulk_upsert_records(db: Session, records: list):
         result = db.execute(stmt)
         db.commit()
         
-        # Note: PostgreSQL doesn't return which were inserts vs updates easily
-        # We return the total count
         return len(records), 0
         
     except Exception as e:
@@ -163,20 +158,31 @@ async def _bulk_upsert_records(db: Session, records: list):
         raise
 
 
+def _update_sync_progress(db: Session, job_id: str, **kwargs):
+    """Update sync status in database"""
+    try:
+        sync_record = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+        if sync_record:
+            for key, value in kwargs.items():
+                setattr(sync_record, key, value)
+            sync_record.last_updated = datetime.utcnow()
+            db.commit()
+            db.refresh(sync_record)
+    except Exception as e:
+        logger.error(f"Failed to update sync progress: {e}")
+        db.rollback()
+
+
 async def _sync_rtarf_background(
+    job_id: str,
     max_records: Optional[int] = None,
-    batch_size: int = 500,
+    batch_size: int = 300,
     commit_batch_size: int = 100
 ):
     """
-    Background task for syncing RTARF data
-    This runs asynchronously without blocking the API response
+    Background task for syncing RTARF data with database-tracked status
     """
-    from datetime import datetime
-    
-    logger.info(f"Starting background sync (max_records={max_records})")
-    sync_status["is_running"] = True
-    sync_status["last_run"] = datetime.utcnow().isoformat()
+    logger.info(f"Starting background sync job {job_id} (max_records={max_records})")
     
     db = SessionLocal()
     scroll_time = "2m"
@@ -187,13 +193,15 @@ async def _sync_rtarf_background(
     
     query = {
         "query": {
-            "bool": {
-                "should": [
-                    {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}},
-                    {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}}
-                ],
-                "minimum_should_match": 1
-            }
+            # "bool": {
+            #     "should": [
+            #         {"exists": {"field": "palo-xsiam.mitre_tactics_ids_and_names"}},
+            #         {"exists": {"field": "crowdstrike.event.MitreAttack.Tactic"}},
+            #         # {"exists": {"field": "suricata.classification"}}
+            #     ],
+            #     "minimum_should_match": 1
+            # }
+            "match_all": {}
         }
     }
     
@@ -211,6 +219,12 @@ async def _sync_rtarf_background(
         record_batch = []
         
         while True:
+            # Check if job was cancelled
+            sync_record = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+            if sync_record and sync_record.status == "cancelled":
+                logger.info(f"Job {job_id} was cancelled, stopping sync")
+                return
+            
             hits = resp["hits"]["hits"]
             if not hits:
                 break
@@ -247,9 +261,9 @@ async def _sync_rtarf_background(
                         "crowdstrike_tactics_ids": fields["cs_tactics_ids"],
                         "crowdstrike_techniques": fields["cs_techniques"],
                         "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
-                        "crowdstrike_severity":fields["cs_severity"],
-                        "crowdstrike_event_name":fields["cs_event_name"],
-                        "crowdstrike_event_objective":fields["cs_event_objective"],
+                        "crowdstrike_severity": fields["cs_severity"],
+                        "crowdstrike_event_name": fields["cs_event_name"],
+                        "crowdstrike_event_objective": fields["cs_event_objective"],
                         "suricata_classification": fields["suricata_classification"],
                         "timestamp": parsed_ts
                     }
@@ -261,7 +275,17 @@ async def _sync_rtarf_background(
                         inserted, updated = await _bulk_upsert_records(db, record_batch)
                         total_inserted += inserted
                         total_updated += updated
-                        logger.info(f"Bulk upserted {len(record_batch)} records")
+                        
+                        # Update progress in database
+                        _update_sync_progress(
+                            db, 
+                            job_id,
+                            records_fetched=total_fetched,
+                            records_inserted=total_inserted,
+                            records_updated=total_updated
+                        )
+                        
+                        logger.info(f"Job {job_id}: Bulk upserted {len(record_batch)} records")
                         record_batch = []
                     
                 except Exception as e:
@@ -269,7 +293,7 @@ async def _sync_rtarf_background(
                     continue
             
             total_fetched += len(hits)
-            logger.info(f"Fetched {total_fetched} documents...")
+            logger.info(f"Job {job_id}: Fetched {total_fetched} documents...")
             
             # Check limit again
             if max_records and total_fetched >= max_records:
@@ -283,30 +307,39 @@ async def _sync_rtarf_background(
             inserted, updated = await _bulk_upsert_records(db, record_batch)
             total_inserted += inserted
             total_updated += updated
-            logger.info(f"Final bulk upsert of {len(record_batch)} records")
+            logger.info(f"Job {job_id}: Final bulk upsert of {len(record_batch)} records")
         
-        result = {
-            "status": "success",
-            "fetched": total_fetched,
-            "inserted": total_inserted,
-            "updated": total_updated
-        }
+        # Mark as completed
+        _update_sync_progress(
+            db,
+            job_id,
+            status="completed",
+            completed_at=datetime.utcnow(),
+            records_fetched=total_fetched,
+            records_inserted=total_inserted,
+            records_updated=total_updated
+        )
         
-        logger.info(f"Sync complete: {result}")
-        sync_status["last_result"] = result
+        logger.info(f"Job {job_id} completed: fetched={total_fetched}, inserted={total_inserted}")
         
     except Exception as e:
         error_msg = f"Sync failed: {str(e)}"
-        logger.error(error_msg)
-        sync_status["last_result"] = {
-            "status": "error",
-            "error": error_msg,
-            "fetched": total_fetched
-        }
+        logger.error(f"Job {job_id}: {error_msg}")
+        
+        # Mark as failed
+        _update_sync_progress(
+            db,
+            job_id,
+            status="failed",
+            completed_at=datetime.utcnow(),
+            error_message=error_msg,
+            records_fetched=total_fetched,
+            records_inserted=total_inserted,
+            records_updated=total_updated
+        )
         db.rollback()
         
     finally:
-        sync_status["is_running"] = False
         db.close()
         
         # Always cleanup scroll context
@@ -319,7 +352,7 @@ async def _sync_rtarf_background(
 
 @app.get("/sync-rtarf")
 async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
-    """Original sync endpoint - synchronous, limited to 100 records"""
+    """Original sync endpoint - synchronous, limited to 300 records"""
     query = {
         "query": {
             "bool": {
@@ -332,7 +365,7 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
         }
     }
     
-    resp = await es.search(index="rtarf-events-beat*", body=query, size=500)
+    resp = await es.search(index="rtarf-events-beat*", body=query, size=300)
     
     record_batch = []
     
@@ -361,8 +394,8 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
             "crowdstrike_techniques": fields["cs_techniques"],
             "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
             "crowdstrike_severity": fields["cs_severity"],  
-            "crowdstrike_event_name":fields["cs_event_name"],
-            "crowdstrike_event_objective":fields["cs_event_objective"],
+            "crowdstrike_event_name": fields["cs_event_name"],
+            "crowdstrike_event_objective": fields["cs_event_objective"],
             "suricata_classification": fields["suricata_classification"],
             "timestamp": parsed_ts
         }
@@ -374,11 +407,11 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         return {"error": "integrity error inserting records"}
-    
+
 
 @app.get("/sync-rtarf-palo")
-async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
-    """Original sync endpoint - synchronous, limited to 100 records"""
+async def sync_rtarf_palo(db: Session = Depends(get_db)):
+    """Sync only Palo-XSIAM events"""
     query = {
         "query": {
             "bool": {
@@ -419,8 +452,8 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
             "crowdstrike_techniques": fields["cs_techniques"],
             "crowdstrike_techniques_ids": fields["cs_techniques_ids"],
             "crowdstrike_severity": fields["cs_severity"],
-            "crowdstrike_event_name":fields["cs_event_name"],
-            "crowdstrike_event_objective":fields["cs_event_objective"],
+            "crowdstrike_event_name": fields["cs_event_name"],
+            "crowdstrike_event_objective": fields["cs_event_objective"],
             "suricata_classification": fields["suricata_classification"],
             "timestamp": parsed_ts
         }
@@ -432,7 +465,8 @@ async def sync_rtarf_to_postgres(db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         return {"error": "integrity error inserting records"}
-    
+
+
 @app.get("/sync-rtarf-suricata")
 async def sync_rtarf_suricata(db: Session = Depends(get_db)):
     """Sync only Suricata events"""
@@ -489,11 +523,11 @@ async def sync_rtarf_suricata(db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         return {"error": "integrity error inserting records"}
-    
+
 
 @app.get("/sync-rtarf-crowdstrike")
-async def sync_rtarf_suricata(db: Session = Depends(get_db)):
-    """Sync only Suricata events"""
+async def sync_rtarf_crowdstrike(db: Session = Depends(get_db)):
+    """Sync only CrowdStrike events"""
     query = {
         "query": {
             "bool": {
@@ -547,11 +581,12 @@ async def sync_rtarf_suricata(db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         return {"error": "integrity error inserting records"}
-    
+
 
 @app.post("/sync-rtarf-all")
 async def sync_rtarf_all(
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
     max_records: Optional[int] = Query(None, description="Maximum number of records to sync (None for all)"),
     batch_size: int = Query(500, description="Elasticsearch scroll batch size"),
     commit_batch_size: int = Query(100, description="Database commit batch size")
@@ -563,18 +598,43 @@ async def sync_rtarf_all(
     - **batch_size**: How many records to fetch per Elasticsearch scroll
     - **commit_batch_size**: How many records to bulk upsert at once
     
-    Returns immediately with sync started in background
+    Returns immediately with job_id for tracking
     """
-    if sync_status["is_running"]:
+    # Check if there's already a running sync
+    running_sync = db.query(SyncStatus).filter(
+        SyncStatus.status == "running"
+    ).first()
+    
+    if running_sync:
         return {
             "status": "already_running",
             "message": "A sync is already in progress",
-            "last_run": sync_status["last_run"]
+            "job_id": running_sync.job_id,
+            "started_at": running_sync.started_at.isoformat()
         }
+    
+    # Create new sync job record
+    job_id = str(uuid.uuid4())
+    sync_record = SyncStatus(
+        job_id=job_id,
+        status="running",
+        started_at=datetime.utcnow(),
+        max_records=max_records,
+        batch_size=batch_size,
+        commit_batch_size=commit_batch_size
+    )
+    
+    try:
+        db.add(sync_record)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create sync job: {e}")
     
     # Start background task
     background_tasks.add_task(
         _sync_rtarf_background,
+        job_id=job_id,
         max_records=max_records,
         batch_size=batch_size,
         commit_batch_size=commit_batch_size
@@ -583,16 +643,157 @@ async def sync_rtarf_all(
     return {
         "status": "started",
         "message": "Sync started in background",
+        "job_id": job_id,
         "max_records": max_records,
         "batch_size": batch_size,
         "commit_batch_size": commit_batch_size
     }
 
 
+@app.get("/sync-status/{job_id}")
+async def get_sync_status_by_id(job_id: str, db: Session = Depends(get_db)):
+    """Get the status of a specific sync job by job_id"""
+    sync_record = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+    
+    if not sync_record:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    return {
+        "job_id": sync_record.job_id,
+        "status": sync_record.status,
+        "started_at": sync_record.started_at.isoformat() if sync_record.started_at else None,
+        "completed_at": sync_record.completed_at.isoformat() if sync_record.completed_at else None,
+        "last_updated": sync_record.last_updated.isoformat() if sync_record.last_updated else None,
+        "max_records": sync_record.max_records,
+        "batch_size": sync_record.batch_size,
+        "commit_batch_size": sync_record.commit_batch_size,
+        "records_fetched": sync_record.records_fetched,
+        "records_inserted": sync_record.records_inserted,
+        "records_updated": sync_record.records_updated,
+        "error_message": sync_record.error_message
+    }
+
+
 @app.get("/sync-status")
-async def get_sync_status():
-    """Check the status of background sync operations"""
-    return sync_status
+async def get_latest_sync_status(db: Session = Depends(get_db)):
+    """Get the status of the most recent sync job"""
+    sync_record = db.query(SyncStatus).order_by(desc(SyncStatus.started_at)).first()
+    
+    if not sync_record:
+        return {
+            "status": "no_jobs",
+            "message": "No sync jobs found"
+        }
+    
+    return {
+        "job_id": sync_record.job_id,
+        "status": sync_record.status,
+        "started_at": sync_record.started_at.isoformat() if sync_record.started_at else None,
+        "completed_at": sync_record.completed_at.isoformat() if sync_record.completed_at else None,
+        "last_updated": sync_record.last_updated.isoformat() if sync_record.last_updated else None,
+        "max_records": sync_record.max_records,
+        "batch_size": sync_record.batch_size,
+        "commit_batch_size": sync_record.commit_batch_size,
+        "records_fetched": sync_record.records_fetched,
+        "records_inserted": sync_record.records_inserted,
+        "records_updated": sync_record.records_updated,
+        "error_message": sync_record.error_message
+    }
+
+
+@app.get("/sync-history")
+async def get_sync_history(
+    limit: int = Query(10, description="Number of recent jobs to return"),
+    db: Session = Depends(get_db)
+):
+    """Get history of sync jobs"""
+    sync_records = db.query(SyncStatus).order_by(
+        desc(SyncStatus.started_at)
+    ).limit(limit).all()
+    
+    return {
+        "total": len(sync_records),
+        "jobs": [
+            {
+                "job_id": record.job_id,
+                "status": record.status,
+                "started_at": record.started_at.isoformat() if record.started_at else None,
+                "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+                "records_fetched": record.records_fetched,
+                "records_inserted": record.records_inserted,
+                "records_updated": record.records_updated,
+                "error_message": record.error_message
+            }
+            for record in sync_records
+        ]
+    }
+
+
+@app.delete("/sync-history")
+async def clear_sync_history(
+    keep_last: int = Query(5, description="Number of recent jobs to keep"),
+    db: Session = Depends(get_db)
+):
+    """Clear old sync history, keeping only the most recent N jobs"""
+    # Get all job IDs ordered by date
+    all_jobs = db.query(SyncStatus.id).order_by(desc(SyncStatus.started_at)).all()
+    
+    if len(all_jobs) <= keep_last:
+        return {
+            "status": "no_deletion",
+            "message": f"Only {len(all_jobs)} jobs found, keeping all"
+        }
+    
+    # Get IDs to keep
+    keep_ids = [job.id for job in all_jobs[:keep_last]]
+    
+    # Delete old jobs
+    deleted = db.query(SyncStatus).filter(
+        ~SyncStatus.id.in_(keep_ids)
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    
+    return {
+        "status": "success",
+        "deleted": deleted,
+        "kept": keep_last
+    }
+
+
+@app.post("/sync-stop/{job_id}")
+async def stop_sync_job(job_id: str, db: Session = Depends(get_db)):
+    """
+    Mark a running sync job as stopped/cancelled
+    Note: This marks it in the database but doesn't forcefully kill the background task.
+    The background task will see this status and stop gracefully at the next checkpoint.
+    """
+    sync_record = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+    
+    if not sync_record:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    if sync_record.status != "running":
+        return {
+            "status": "not_running",
+            "message": f"Job {job_id} is not running (status: {sync_record.status})",
+            "job_id": job_id
+        }
+    
+    # Mark as cancelled
+    sync_record.status = "cancelled"
+    sync_record.completed_at = datetime.utcnow()
+    sync_record.error_message = "Manually cancelled by user"
+    db.commit()
+    
+    logger.info(f"Job {job_id} marked as cancelled")
+    
+    return {
+        "status": "cancelled",
+        "message": f"Job {job_id} has been marked for cancellation",
+        "job_id": job_id,
+        "note": "The background task will stop at the next checkpoint"
+    }
 
 
 if __name__ == "__main__":

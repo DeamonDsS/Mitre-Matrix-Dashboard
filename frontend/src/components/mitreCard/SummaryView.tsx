@@ -12,7 +12,6 @@ import {
   ArcElement,
 } from "chart.js";
 import { TrendingUp, Target } from "lucide-react";
-import type { SoloSummaryStats } from "../../services/multiMitreService";
 
 // Register Chart.js components
 ChartJS.register(
